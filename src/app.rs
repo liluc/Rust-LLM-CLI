@@ -1,12 +1,15 @@
 use std::{
     error::Error,
     fs,
-    io::{self, Read, stdout},
+    io::{self, stdout},
     path::PathBuf,
-    process::Stdio,
-    sync::mpsc,
-    thread,
     time::{Duration, Instant},
+};
+
+use tokio::{
+    io::AsyncReadExt,
+    process::Command as TokioCommand,
+    sync::mpsc,
 };
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -36,7 +39,7 @@ enum AssistantEvent {
     Failed { idx: usize, error: String },
 }
 
-pub fn run(config: Config) -> Result<()> {
+pub async fn run(config: Config) -> Result<()> {
     ollama::ensure_available(&config.model)?;
 
     let mut terminal = TerminalGuard::new().context("setting up terminal")?;
@@ -109,14 +112,14 @@ struct App {
     input_history: Vec<String>,
     history_idx: Option<usize>,
     pending_workflow: Option<WorkflowState>,
-    assistant_tx: mpsc::Sender<AssistantEvent>,
-    assistant_rx: mpsc::Receiver<AssistantEvent>,
+    assistant_tx: mpsc::UnboundedSender<AssistantEvent>,
+    assistant_rx: mpsc::UnboundedReceiver<AssistantEvent>,
     should_quit: bool,
 }
 
 impl App {
     fn new(config: Config) -> Self {
-        let (assistant_tx, assistant_rx) = mpsc::channel();
+        let (assistant_tx, assistant_rx) = mpsc::unbounded_channel();
         let mut app = Self {
             config,
             session: SessionState::new(),
@@ -299,18 +302,18 @@ fn submit_input(app: &mut App) {
     let model = app.config.model.clone();
     let system_prompt = app.config.system_prompt.clone();
     let timeout_secs = app.config.request_timeout_secs;
-    let prompt_for_thread = prompt.clone();
-    thread::spawn(move || {
+    let prompt_for_task = prompt.clone();
+    tokio::spawn(async move {
         let composed_prompt = format!(
             "{}\n\nUser: {}\nAssistant:",
-            system_prompt, prompt_for_thread
+            system_prompt, prompt_for_task
         );
 
-        let mut child = match std::process::Command::new("ollama")
+        let mut child = match TokioCommand::new("ollama")
             .arg("run")
             .arg(&model)
             .arg(&composed_prompt)
-            .stdout(Stdio::piped())
+            .stdout(std::process::Stdio::piped())
             .spawn()
         {
             Ok(c) => c,
@@ -334,11 +337,11 @@ fn submit_input(app: &mut App) {
                         idx: placeholder_idx,
                         error: format!("ollama run timed out after {timeout_secs}s"),
                     });
-                    let _ = child.kill();
+                    let _ = child.kill().await;
                     return;
                 }
 
-                match stdout.read(&mut buf) {
+                match stdout.read(&mut buf).await {
                     Ok(0) => break,
                     Ok(n) => {
                         let chunk = String::from_utf8_lossy(&buf[..n]).to_string();
@@ -352,14 +355,14 @@ fn submit_input(app: &mut App) {
                             idx: placeholder_idx,
                             error: format!("{err}"),
                         });
-                        let _ = child.kill();
+                        let _ = child.kill().await;
                         return;
                     }
                 }
             }
         }
 
-        match child.wait() {
+        match child.wait().await {
             Ok(status) if status.success() => {
                 // Finalize content (already accumulated in tokens)
                 let _ = tx.send(AssistantEvent::Completed {
@@ -894,8 +897,8 @@ fn maybe_handle_intent(app: &mut App, prompt: &str) -> bool {
             let idx = app.pending_placeholder();
             let tx = app.assistant_tx.clone();
             let config = app.config.clone();
-            thread::spawn(move || {
-                let event = match generate_commit_message(&config, &repo_root) {
+            tokio::spawn(async move {
+                let event = match generate_commit_message_async(&config, &repo_root).await {
                     Some(msg) => AssistantEvent::Completed {
                         idx,
                         content: Some(format!("Suggested commit message:\n{msg}")),
@@ -1042,6 +1045,48 @@ fn generate_commit_message(config: &Config, repo_root: &std::path::Path) -> Opti
         .arg(&config.model)
         .arg(prompt)
         .output()
+        .ok()?;
+
+    if !result.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8_lossy(&result.stdout).to_string();
+    let trimmed = stdout.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+async fn generate_commit_message_async(config: &Config, repo_root: &std::path::Path) -> Option<String> {
+    if !config.generate_commit_message {
+        return None;
+    }
+    let stat = run_command(repo_root, "git", &["diff", "--cached", "--stat"]).ok()?;
+    if stat.trim().is_empty() {
+        return None;
+    }
+    let patch = run_command(
+        repo_root,
+        "git",
+        &["diff", "--cached", "--unified=3", "--max-count=1"],
+    )
+    .unwrap_or_default();
+    let patch_snippet = if patch.len() > 4000 {
+        format!("{}...\n[truncated]", &patch[..4000])
+    } else {
+        patch
+    };
+    let prompt = format!(
+        "Generate a git commit message with:\n- Subject line in imperative mood, <=72 chars, include scope if obvious.\n- Then 1-2 bullet lines summarizing key changes (no line counts or LOC numbers; describe what changed).\nFormat exactly:\nSubject line\n- bullet\n- bullet\nAvoid filler. Staged changes (stat):\n{stat}\n\nPatch snippet:\n{patch_snippet}\n\nReturn only the formatted commit message."
+    );
+    let result = TokioCommand::new("ollama")
+        .arg("run")
+        .arg(&config.model)
+        .arg(prompt)
+        .output()
+        .await
         .ok()?;
 
     if !result.status.success() {

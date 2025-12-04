@@ -32,7 +32,8 @@ enum Command {
     Run,
 }
 
-fn main() -> Result<()> {
+#[tokio::main]
+async fn main() -> Result<()> {
     init_tracing();
     let cli = Cli::parse();
     let config = config::Config::load(cli.config.clone()).context("loading config")?;
@@ -54,7 +55,7 @@ fn main() -> Result<()> {
             println!("Ollama is reachable and model '{model}' is available.");
         }
         Command::Run => {
-            app::run(config)?;
+            app::run(config).await?;
         }
     }
 
