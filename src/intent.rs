@@ -84,6 +84,44 @@ fn extract_args_from_input(input: &str, tool: &str) -> ToolArgs {
                 args.command = Some(cmd.trim().to_string());
             }
         }
+        "list_files" => {
+            // Try to extract path from list command
+            let lower = input.to_lowercase();
+            for prefix in ["list files in ", "show files in ", "ls ", "dir "] {
+                if lower.starts_with(prefix) {
+                    let path = input[prefix.len()..].trim();
+                    if !path.is_empty() {
+                        args.path = Some(path.to_string());
+                        break;
+                    }
+                }
+            }
+        }
+        "write_file" => {
+            // Try to extract path and content from write command
+            let lower = input.to_lowercase();
+            
+            // Extract path
+            for prefix in ["write to ", "save to ", "create ", "write file "] {
+                if lower.starts_with(prefix) {
+                    let rest = input[prefix.len()..].trim();
+                    if let Some(space_idx) = rest.find(char::is_whitespace) {
+                        args.path = Some(rest[..space_idx].to_string());
+                    } else {
+                        args.path = Some(rest.to_string());
+                    }
+                    break;
+                }
+            }
+            
+            // Extract content if "with content:" is present
+            if let Some(content_idx) = lower.find("with content:") {
+                let content = input[content_idx + 13..].trim();
+                if !content.is_empty() {
+                    args.content = Some(content.to_string());
+                }
+            }
+        }
         _ => {}
     }
 
@@ -156,6 +194,26 @@ mod tests {
     fn test_extract_args_stage() {
         let args = extract_args_from_input("stage src/lib.rs", "stage");
         assert_eq!(args.path, Some("src/lib.rs".to_string()));
+    }
+
+    #[test]
+    fn test_extract_args_list_files() {
+        let args = extract_args_from_input("list files in src/", "list_files");
+        assert_eq!(args.path, Some("src/".to_string()));
+
+        let args = extract_args_from_input("ls target", "list_files");
+        assert_eq!(args.path, Some("target".to_string()));
+    }
+
+    #[test]
+    fn test_extract_args_write_file() {
+        let args = extract_args_from_input("write to test.txt with content: Hello world", "write_file");
+        assert_eq!(args.path, Some("test.txt".to_string()));
+        assert_eq!(args.content, Some("Hello world".to_string()));
+
+        let args = extract_args_from_input("create main.rs with content: fn main() {}", "write_file");
+        assert_eq!(args.path, Some("main.rs".to_string()));
+        assert_eq!(args.content, Some("fn main() {}".to_string()));
     }
 }
 

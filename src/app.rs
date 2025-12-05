@@ -1,7 +1,4 @@
 use std::{
-    error::Error,
-    fs,
-    io::{self, stdout},
     path::PathBuf,
     time::{Duration, Instant},
 };
@@ -12,37 +9,23 @@ use tokio::{
     sync::mpsc,
 };
 
-use anyhow::{Context, Result, anyhow, bail};
-use crossterm::{
-    event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
-    execute,
-    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
-};
-use ratatui::{
-    Terminal,
-    backend::CrosstermBackend,
-    layout::{Constraint, Direction, Layout},
-    style::{Color, Style, Stylize},
-    text::{Line, Span},
-    widgets::{Block, Borders, Paragraph, Wrap},
-};
+use anyhow::{Context, Result};
+use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 
 use std::sync::Arc;
 
 use crate::{
     config::Config,
     embedding::EmbeddingCache,
+    handlers::{dispatch_intent, AssistantEvent, IntentDispatcher},
+    input::{expand_bang_shortcut, HistoryNavigation},
     intent::{self, ParsedIntent},
     ollama,
     session::{Message, Role, SessionState},
     tools::ToolArgs,
+    ui::{render_ui, AppView, InputMode, TerminalGuard},
+    workflow::{generate_commit_message, handle_workflow_response, WorkflowResponder, WorkflowState},
 };
-
-enum AssistantEvent {
-    Token { idx: usize, chunk: String },
-    Completed { idx: usize, content: Option<String> },
-    Failed { idx: usize, error: String },
-}
 
 pub async fn run(config: Config) -> Result<()> {
     ollama::ensure_available(&config.model)?;
@@ -51,7 +34,10 @@ pub async fn run(config: Config) -> Result<()> {
     let mut embedding_cache = EmbeddingCache::new(None);
     eprintln!("Initializing embedding cache (this may take a moment)...");
     if let Err(e) = embedding_cache.initialize().await {
-        eprintln!("Warning: Could not initialize embeddings: {}. Falling back to direct chat.", e);
+        eprintln!(
+            "Warning: Could not initialize embeddings: {}. Falling back to direct chat.",
+            e
+        );
         eprintln!("Tip: Run 'ollama pull nomic-embed-text' to enable semantic matching.");
     }
     let embedding_cache = Arc::new(embedding_cache);
@@ -64,7 +50,10 @@ pub async fn run(config: Config) -> Result<()> {
     loop {
         terminal
             .terminal
-            .draw(|f| ui(f, &app))
+            .draw(|f| {
+                let view = app.create_view();
+                render_ui(f, view);
+            })
             .context("drawing frame")?;
 
         let timeout = tick_rate
@@ -91,36 +80,6 @@ pub async fn run(config: Config) -> Result<()> {
     }
 
     Ok(())
-}
-
-struct TerminalGuard {
-    terminal: Terminal<CrosstermBackend<std::io::Stdout>>,
-}
-
-impl TerminalGuard {
-    fn new() -> Result<Self> {
-        enable_raw_mode().context("enable raw mode")?;
-        let mut stdout = stdout();
-        execute!(stdout, EnterAlternateScreen).context("enter alternate screen")?;
-        let backend = CrosstermBackend::new(stdout);
-        let mut terminal = Terminal::new(backend).context("create terminal")?;
-        terminal.show_cursor().context("show cursor")?;
-        Ok(Self { terminal })
-    }
-}
-
-impl Drop for TerminalGuard {
-    fn drop(&mut self) {
-        let _ = disable_raw_mode();
-        let _ = execute!(self.terminal.backend_mut(), LeaveAlternateScreen);
-        let _ = self.terminal.show_cursor();
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum InputMode {
-    Chat,
-    Shell,
 }
 
 struct App {
@@ -174,6 +133,25 @@ impl App {
         app
     }
 
+    fn create_view(&self) -> AppView<'_> {
+        AppView {
+            messages: &self.messages,
+            scroll: self.scroll,
+            input: &self.input,
+            input_mode: self.input_mode,
+            model: &self.config.model,
+            streaming: self.config.streaming,
+            cwd: self.session.cwd.to_string_lossy().to_string(),
+            repo_root: self
+                .session
+                .repo_root
+                .as_ref()
+                .map(|p| p.to_string_lossy().to_string()),
+            pending_count: self.pending_idxs.len(),
+            has_workflow: self.pending_workflow.is_some(),
+        }
+    }
+
     fn poll_assistant(&mut self) {
         while let Ok(event) = self.assistant_rx.try_recv() {
             match event {
@@ -183,16 +161,6 @@ impl App {
             }
             self.scroll = 0;
         }
-    }
-
-    fn pending_placeholder(&mut self) -> usize {
-        let idx = self.messages.len();
-        self.messages.push(Message {
-            role: Role::Assistant,
-            content: "…".to_string(),
-        });
-        self.pending_idxs.push(idx);
-        idx
     }
 
     fn push_recorded(&mut self, role: Role, content: impl Into<String>) -> usize {
@@ -254,11 +222,7 @@ impl App {
                     confidence: 0.8,
                 };
                 // We need to get the original input from history
-                let original_input = self
-                    .input_history
-                    .last()
-                    .cloned()
-                    .unwrap_or_default();
+                let original_input = self.input_history.last().cloned().unwrap_or_default();
                 dispatch_intent(self, &intent, &original_input);
             }
             return;
@@ -289,6 +253,62 @@ impl App {
         } else {
             self.messages.push(Message { role, content });
         }
+    }
+}
+
+// Implement IntentDispatcher for App
+impl IntentDispatcher for App {
+    fn reply(&mut self, content: impl Into<String>) {
+        self.reply(content);
+    }
+
+    fn push_recorded(&mut self, role: Role, content: impl Into<String>) -> usize {
+        self.push_recorded(role, content)
+    }
+
+    fn set_pending_workflow(&mut self, workflow: WorkflowState) {
+        self.pending_workflow = Some(workflow);
+    }
+
+    fn get_session_cwd(&self) -> PathBuf {
+        self.session.cwd.clone()
+    }
+
+    fn get_session_repo_root(&self) -> Option<PathBuf> {
+        self.session.repo_root.clone()
+    }
+
+    fn get_input_history(&self) -> &[String] {
+        &self.input_history
+    }
+
+    fn get_config(&self) -> &Config {
+        &self.config
+    }
+
+    fn get_assistant_tx(&self) -> mpsc::UnboundedSender<AssistantEvent> {
+        self.assistant_tx.clone()
+    }
+
+    fn pending_placeholder(&mut self) -> usize {
+        let idx = self.messages.len();
+        self.messages.push(Message {
+            role: Role::Assistant,
+            content: "…".to_string(),
+        });
+        self.pending_idxs.push(idx);
+        idx
+    }
+
+    fn set_session_cwd(&mut self, new_cwd: PathBuf) {
+        self.session.set_cwd(new_cwd);
+    }
+}
+
+// Implement WorkflowResponder for App
+impl WorkflowResponder for App {
+    fn reply(&mut self, content: impl Into<String>) {
+        self.reply(content);
     }
 }
 
@@ -349,32 +369,71 @@ fn submit_input(app: &mut App) {
             .or_else(|| expanded.trim().strip_prefix('!'))
             .map(|s| s.trim())
             .unwrap_or(&expanded);
-        handle_shell_dispatch(app, cmd);
+        crate::handlers::handle_shell_dispatch(app, cmd);
         return;
     }
 
     let prompt = raw_input;
     app.push_recorded(Role::User, prompt.clone());
-    
+
     // Store in history with mode marker for filtering
     let history_entry = if app.input_mode == InputMode::Shell {
         format!("$ {}", prompt) // Mark as shell command internally
     } else {
         prompt.clone()
     };
-    if app.input_history.last().map_or(true, |s| s != &history_entry) {
+    if app
+        .input_history
+        .last()
+        .map_or(true, |s| s != &history_entry)
+    {
         app.input_history.push(history_entry);
     }
 
     // Handle pending workflow confirmations first
     if let Some(workflow) = app.pending_workflow.take() {
-        handle_workflow_response(app, workflow, &prompt);
+        // Need to handle special case for SaveWorkPlan
+        if matches!(workflow.kind, crate::workflow::WorkflowKind::SaveWorkPlan) {
+            let confirmed = matches!(prompt.trim().to_lowercase().as_str(), "y" | "yes");
+            if confirmed {
+                // Run git add -A first
+                match crate::commands::run_command(&workflow.repo_root, "git", &["add", "-A"]) {
+                    Ok(out) => {
+                        if !out.trim().is_empty() {
+                            app.reply(format!("git add -A output:\n{out}"));
+                        }
+                    }
+                    Err(err) => {
+                        app.reply(format!("git add -A failed: {}", crate::commands::format_error(&err)));
+                        return;
+                    }
+                }
+
+                // Generate commit message and move to next step
+                let suggested = generate_commit_message(&app.config, &workflow.repo_root)
+                    .unwrap_or_else(|| "chore: save work".to_string());
+                app.pending_workflow = Some(WorkflowState {
+                    kind: crate::workflow::WorkflowKind::SaveWorkCommit {
+                        suggested: suggested.clone(),
+                    },
+                    repo_root: workflow.repo_root.clone(),
+                });
+                app.reply(format!(
+                    "Suggested commit message:\n{}\nReply 'yes' to accept, or type a custom message. (Type 'cancel' to abort.)",
+                    suggested
+                ));
+            } else {
+                app.reply("Workflow cancelled.");
+            }
+        } else {
+            handle_workflow_response(app, workflow, &prompt);
+        }
         return;
     }
 
     // If in Shell mode, execute as shell command directly
     if app.input_mode == InputMode::Shell {
-        handle_shell_dispatch(app, &prompt);
+        crate::handlers::handle_shell_dispatch(app, &prompt);
         return;
     }
 
@@ -405,7 +464,9 @@ fn submit_input(app: &mut App) {
     tokio::spawn(async move {
         // Try embedding-based intent matching if available
         if use_embeddings {
-            if let Ok(parsed) = intent::parse_intent_with_embeddings(&embedding_cache, &prompt_for_task).await {
+            if let Ok(parsed) =
+                intent::parse_intent_with_embeddings(&embedding_cache, &prompt_for_task).await
+            {
                 // Non-chat intents get dispatched via signal to main thread
                 if parsed.tool != "chat" && parsed.confidence >= 0.5 {
                     let _ = tx.send(AssistantEvent::Completed {
@@ -503,945 +564,25 @@ fn submit_input(app: &mut App) {
     });
 }
 
-fn ui(f: &mut ratatui::Frame, app: &App) {
-    let cwd_display = app.session.cwd.to_string_lossy();
-    let repo_display = app
-        .session
-        .repo_root
-        .as_ref()
-        .map(|p| p.to_string_lossy().to_string())
-        .unwrap_or_else(|| "-".to_string());
-
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Min(3),
-            Constraint::Length(3),
-            Constraint::Length(1),
-        ])
-        .split(f.size());
-
-    let message_lines = render_messages(&app.messages);
-    let visible = clip_lines_from_bottom(&message_lines, app.scroll, chunks[0].height as usize);
-    let log = Paragraph::new(visible)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title("Conversation (↑/↓/PgUp/PgDn scroll)"),
-        )
-        .wrap(Wrap { trim: true });
-    f.render_widget(log, chunks[0]);
-
-    let mode_indicator = match app.input_mode {
-        InputMode::Chat => "Chat Mode (Ctrl+S for Shell)",
-        InputMode::Shell => "Shell Mode (Ctrl+S for Chat)",
-    };
-    let input = Paragraph::new(app.input.as_str()).block(
-        Block::default()
-            .borders(Borders::ALL)
-            .title(format!("Input: {} | Enter to submit", mode_indicator)),
-    );
-    f.render_widget(input, chunks[1]);
-
-    // Position cursor at the end of input text
-    // +1 for border, +1 for the position after last character
-    let cursor_x = chunks[1].x + app.input.len() as u16 + 1;
-    let cursor_y = chunks[1].y + 1; // +1 for top border
-    f.set_cursor(cursor_x, cursor_y);
-
-    let status_text = Line::from(vec![
-        Span::raw("model: "),
-        Span::raw(&app.config.model).bold(),
-        Span::raw(" | streaming: "),
-        Span::raw(if app.config.streaming { "on" } else { "off" }).bold(),
-        Span::raw(" | style: bullets "),
-        Span::raw(" | cwd: "),
-        Span::raw(cwd_display),
-        Span::raw(" | repo: "),
-        Span::raw(repo_display),
-        Span::raw(" | pending: "),
-        Span::raw(app.pending_idxs.len().to_string()).bold(),
-        Span::raw(" | workflow: "),
-        Span::raw(if app.pending_workflow.is_some() {
-            "confirm"
-        } else {
-            "-"
-        })
-        .bold(),
-        Span::raw(" | mode: Ctrl+S | history: ↑/↓ | scroll: PgUp/PgDn | quit: Esc/q"),
-    ]);
-    let status = Paragraph::new(status_text);
-    f.render_widget(status, chunks[2]);
-}
-
-/// Check if a history entry is a shell command.
-fn is_shell_command(entry: &str) -> bool {
-    let trimmed = entry.trim();
-    trimmed.starts_with('$') || trimmed.starts_with('!')
-}
-
-/// Expand bash-style bang shortcuts.
-/// Returns Some(expanded_command) if a shortcut was matched, None otherwise.
-fn expand_bang_shortcut(history: &[String], input: &str) -> Option<String> {
-    let trimmed = input.trim();
-    
-    // !! - repeat last shell command
-    if trimmed == "!!" {
-        return history
-            .iter()
-            .rev()
-            .find(|e| is_shell_command(e))
-            .cloned();
-    }
-    
-    // !prefix - find last command starting with prefix (after the !)
-    if trimmed.starts_with('!') && trimmed.len() > 1 && !trimmed.starts_with("! ") {
-        let prefix = &trimmed[1..];
-        // Look for shell commands whose command part starts with prefix
-        for entry in history.iter().rev() {
-            if is_shell_command(entry) {
-                // Extract the command part after $ or !
-                let cmd_part = entry.trim().strip_prefix('$')
-                    .or_else(|| entry.trim().strip_prefix('!'))
-                    .map(|s| s.trim())
-                    .unwrap_or("");
-                if cmd_part.starts_with(prefix) {
-                    return Some(entry.clone());
-                }
-            }
-        }
-    }
-    
-    None
-}
-
 fn recall_history_prev(app: &mut App) {
-    if app.input_history.is_empty() {
-        return;
+    let nav = HistoryNavigation::new(&app.input_history, app.input_mode);
+    if let Some((idx, display)) = nav.get_prev(app.history_idx) {
+        app.history_idx = Some(idx);
+        app.input = display;
     }
-    
-    // Filter history based on current mode
-    let filter_by_mode = app.input_mode == InputMode::Shell;
-    let start = app.history_idx.map(|i| i.saturating_sub(1)).unwrap_or(app.input_history.len().saturating_sub(1));
-    
-    // Search backwards for a matching entry
-    for i in (0..=start).rev() {
-        if let Some(entry) = app.input_history.get(i) {
-            let is_shell = is_shell_command(entry);
-            // In Shell mode, show only shell commands; in Chat mode, show only non-shell
-            let matches_mode = if filter_by_mode { is_shell } else { !is_shell };
-            if matches_mode {
-                app.history_idx = Some(i);
-                // Strip $ prefix in Shell mode for cleaner display
-                app.input = if filter_by_mode {
-                    entry.trim().strip_prefix('$')
-                        .or_else(|| entry.trim().strip_prefix('!'))
-                        .map(|s| s.trim().to_string())
-                        .unwrap_or_else(|| entry.clone())
-                } else {
-                    entry.clone()
-                };
-                return;
-            }
-        }
-    }
-    // No match found; keep current state
 }
 
 fn recall_history_next(app: &mut App) {
-    if app.input_history.is_empty() {
-        return;
-    }
-    
-    let filter_by_mode = app.input_mode == InputMode::Shell;
-    let start = match app.history_idx {
-        None => return,
-        Some(i) => i + 1,
-    };
-    
-    // Search forwards for a matching entry
-    for i in start..app.input_history.len() {
-        if let Some(entry) = app.input_history.get(i) {
-            let is_shell = is_shell_command(entry);
-            // In Shell mode, show only shell commands; in Chat mode, show only non-shell
-            let matches_mode = if filter_by_mode { is_shell } else { !is_shell };
-            if matches_mode {
-                app.history_idx = Some(i);
-                // Strip $ prefix in Shell mode for cleaner display
-                app.input = if filter_by_mode {
-                    entry.trim().strip_prefix('$')
-                        .or_else(|| entry.trim().strip_prefix('!'))
-                        .map(|s| s.trim().to_string())
-                        .unwrap_or_else(|| entry.clone())
-                } else {
-                    entry.clone()
-                };
-                return;
-            }
+    let nav = HistoryNavigation::new(&app.input_history, app.input_mode);
+    match nav.get_next(app.history_idx) {
+        Some((idx, display)) => {
+            app.history_idx = Some(idx);
+            app.input = display;
+        }
+        None => {
+            // Reached end of history; clear input
+            app.history_idx = None;
+            app.input.clear();
         }
     }
-    
-    // Reached end of history; clear input
-    app.history_idx = None;
-    app.input.clear();
-}
-
-fn handle_workflow_response(app: &mut App, workflow: WorkflowState, prompt: &str) {
-    match workflow.kind {
-        WorkflowKind::SaveWorkPlan => {
-            let confirmed = matches!(prompt.trim().to_lowercase().as_str(), "y" | "yes");
-            if !confirmed {
-                app.reply("Workflow cancelled.".to_string());
-                return;
-            }
-
-            match run_command(&workflow.repo_root, "git", &["add", "-A"]) {
-                Ok(out) => {
-                    if !out.trim().is_empty() {
-                        app.reply(format!("git add -A output:\n{out}"));
-                    }
-                }
-                Err(err) => {
-                    app.reply(format!("git add -A failed: {}", format_error(&err)));
-                    return;
-                }
-            }
-
-            let suggested = generate_commit_message(&app.config, &workflow.repo_root)
-                .unwrap_or_else(|| "chore: save work".to_string());
-            app.pending_workflow = Some(WorkflowState {
-                kind: WorkflowKind::SaveWorkCommit {
-                    suggested: suggested.clone(),
-                },
-                repo_root: workflow.repo_root.clone(),
-            });
-            app.reply(format!(
-                "Suggested commit message:\n{}\nReply 'yes' to accept, or type a custom message. (Type 'cancel' to abort.)",
-                suggested
-            ));
-        }
-        WorkflowKind::SaveWorkCommit { suggested } => {
-            let lower = prompt.trim().to_lowercase();
-            if matches!(lower.as_str(), "cancel" | "no" | "n") {
-                app.reply("Workflow cancelled.".to_string());
-                return;
-            }
-            let commit_msg = if matches!(lower.as_str(), "yes" | "y") {
-                suggested
-            } else {
-                prompt.trim().to_string()
-            };
-            run_save_work(app, &workflow.repo_root, &commit_msg);
-        }
-        WorkflowKind::StagePlan { args } => {
-            if matches!(prompt.trim().to_lowercase().as_str(), "yes" | "y") {
-                let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-                match run_command(&workflow.repo_root, "git", &arg_refs) {
-                    Ok(out) => {
-                        let detail = if out.trim().is_empty() {
-                            "ok".to_string()
-                        } else {
-                            out
-                        };
-                        app.reply(format!("git {} ok\n{}", args.join(" "), detail));
-                    }
-                    Err(err) => app.reply(format!(
-                        "git {} failed: {}",
-                        args.join(" "),
-                        format_error(&err)
-                    )),
-                }
-            } else {
-                app.reply("Staging cancelled.".to_string());
-            }
-        }
-        WorkflowKind::DiffPreview { file } => {
-            let input = prompt.trim();
-            if matches!(input.to_lowercase().as_str(), "cancel" | "no" | "n") {
-                app.reply("Cancelled.".to_string());
-                return;
-            }
-            if input.eq_ignore_ascii_case("yes") || input.eq_ignore_ascii_case("y") {
-                app.reply("Ok.".to_string());
-                return;
-            }
-            let target = if input.is_empty() {
-                file.unwrap_or_default()
-            } else {
-                input.to_string()
-            };
-            if target.is_empty() {
-                app.reply("No file specified.".to_string());
-                return;
-            }
-            let diff = run_command(&workflow.repo_root, "git", &["diff", "--", &target])
-                .unwrap_or_else(|e| format!("(git diff failed: {})", format_error(&e)));
-            app.reply(format!("Diff for {}:\n{}", target, diff));
-        }
-        WorkflowKind::CommitOnlyConfirm { suggested } => {
-            let lower = prompt.trim().to_lowercase();
-            if matches!(lower.as_str(), "cancel" | "no" | "n") {
-                app.reply("Commit cancelled.".to_string());
-                return;
-            }
-            let commit_msg = if matches!(lower.as_str(), "yes" | "y") {
-                suggested
-            } else {
-                prompt.trim().to_string()
-            };
-            let mut logs = vec![format!("Using commit message:\n{}", commit_msg)];
-            let (subject, body_lines) = split_commit_message(&commit_msg);
-            let mut commit_args: Vec<String> = vec!["commit".into(), "-m".into(), subject];
-            for line in body_lines {
-                commit_args.push("-m".into());
-                commit_args.push(line);
-            }
-            let commit_arg_refs: Vec<&str> = commit_args.iter().map(|s| s.as_str()).collect();
-            if !run_workflow_step(
-                &mut logs,
-                &workflow.repo_root,
-                "git commit",
-                "git",
-                &commit_arg_refs,
-            ) {
-                app.reply(logs.join("\n"));
-                return;
-            }
-            logs.push("Commit completed (no push).".to_string());
-            app.reply(logs.join("\n"));
-        }
-    }
-}
-
-fn run_save_work(app: &mut App, repo_root: &std::path::Path, commit_msg: &str) {
-    let mut logs = vec!["Running save-work workflow…".to_string()];
-
-    logs.push(format!("Using commit message: {}", commit_msg));
-
-    let (subject, body_lines) = split_commit_message(commit_msg);
-    let mut commit_args: Vec<String> = vec!["commit".into(), "-m".into(), subject];
-    for line in body_lines {
-        commit_args.push("-m".into());
-        commit_args.push(line);
-    }
-    let commit_arg_refs: Vec<&str> = commit_args.iter().map(|s| s.as_str()).collect();
-
-    if !run_workflow_step(&mut logs, repo_root, "git commit", "git", &commit_arg_refs) {
-        app.reply(logs.join("\n"));
-        return;
-    }
-
-    if !run_workflow_step(&mut logs, repo_root, "git push", "git", &["push"]) {
-        app.reply(logs.join("\n"));
-        return;
-    }
-
-    logs.push("Workflow completed successfully.".to_string());
-    app.reply(logs.join("\n"));
-}
-
-fn run_workflow_step(
-    logs: &mut Vec<String>,
-    repo_root: &std::path::Path,
-    label: &str,
-    program: &str,
-    args: &[&str],
-) -> bool {
-    match run_command(repo_root, program, args) {
-        Ok(out) => {
-            logs.push(format!("{label} OK\n{out}"));
-            true
-        }
-        Err(err) => {
-            logs.push(format!("{label} failed: {err}"));
-            false
-        }
-    }
-}
-
-fn run_command(cwd: &std::path::Path, program: &str, args: &[&str]) -> Result<String> {
-    let output = std::process::Command::new(program)
-        .args(args)
-        .current_dir(cwd)
-        .output()
-        .map_err(|e| {
-            if e.kind() == io::ErrorKind::NotFound {
-                anyhow!("command '{program}' not found in PATH")
-            } else {
-                e.into()
-            }
-        })
-        .with_context(|| format!("running {program} {:?}", args))?;
-
-    if !output.status.success() {
-        // Allow ripgrep exit code 1 (no matches) as a soft success.
-        if program == "rg" && output.status.code() == Some(1) {
-            let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-            return Ok(stdout.trim().to_string());
-        }
-        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-        bail!(
-            "{program} {:?} exited with {}.\nstdout:\n{}\nstderr:\n{}",
-            args,
-            output.status,
-            stdout,
-            stderr
-        );
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-    Ok(stdout.trim().to_string())
-}
-
-fn format_error(err: &anyhow::Error) -> String {
-    let mut parts = vec![err.to_string()];
-    let mut current: Option<&(dyn Error + 'static)> = err.source();
-    while let Some(src) = current {
-        parts.push(src.to_string());
-        current = src.source();
-    }
-    parts.join(": ")
-}
-
-#[derive(Debug, Clone)]
-struct WorkflowState {
-    kind: WorkflowKind,
-    repo_root: std::path::PathBuf,
-}
-
-#[derive(Debug, Clone)]
-enum WorkflowKind {
-    SaveWorkPlan,
-    SaveWorkCommit { suggested: String },
-    CommitOnlyConfirm { suggested: String },
-    StagePlan { args: Vec<String> },
-    DiffPreview { file: Option<String> },
-}
-
-fn handle_cd(app: &mut App, cmd: &str) {
-    let target = cmd.strip_prefix("cd").unwrap_or("").trim();
-    
-    let new_path = if target.is_empty() || target == "~" {
-        // cd with no args or ~ goes to home
-        dirs::home_dir().unwrap_or_else(|| app.session.cwd.clone())
-    } else if target == "-" {
-        // cd - not supported, just stay
-        app.reply("cd - not supported; use absolute path");
-        return;
-    } else if target.starts_with('/') {
-        // Absolute path
-        PathBuf::from(target)
-    } else if target.starts_with("~/") {
-        // Home-relative path
-        if let Some(home) = dirs::home_dir() {
-            home.join(&target[2..])
-        } else {
-            app.reply("Cannot resolve home directory");
-            return;
-        }
-    } else {
-        // Relative path
-        app.session.cwd.join(target)
-    };
-
-    // Canonicalize and check existence
-    match new_path.canonicalize() {
-        Ok(canonical) => {
-            if canonical.is_dir() {
-                app.session.set_cwd(canonical.clone());
-                app.reply(format!("cd {}", canonical.display()));
-            } else {
-                app.reply(format!("Not a directory: {}", new_path.display()));
-            }
-        }
-        Err(err) => {
-            app.reply(format!("cd: {}: {}", new_path.display(), err));
-        }
-    }
-}
-
-fn run_shell_command(cwd: &std::path::Path, cmd: &str) -> Result<String> {
-    let output = std::process::Command::new("sh")
-        .arg("-c")
-        .arg(cmd)
-        .current_dir(cwd)
-        .output()
-        .context("spawning shell")?;
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-
-    if !output.status.success() {
-        if !stderr.trim().is_empty() {
-            bail!("{}", stderr.trim());
-        } else {
-            bail!("command exited with {}", output.status);
-        }
-    }
-
-    // Combine stdout and stderr for complete output
-    let mut result = stdout.to_string();
-    if !stderr.trim().is_empty() {
-        if !result.is_empty() {
-            result.push('\n');
-        }
-        result.push_str(&stderr);
-    }
-    Ok(result.trim().to_string())
-}
-
-fn parse_show_file(prompt: &str) -> Option<PathBuf> {
-    let lower = prompt.to_lowercase();
-    let prefixes = ["show file ", "read file ", "open file ", "show "];
-    for p in prefixes {
-        if lower.starts_with(p) {
-            let rest = prompt[p.len()..].trim();
-            if !rest.is_empty() {
-                return Some(PathBuf::from(rest));
-            }
-        }
-    }
-    None
-}
-
-/// Dispatch a parsed intent to the appropriate handler.
-/// Returns true if the intent was handled, false if it should fall through to chat.
-fn dispatch_intent(app: &mut App, intent: &ParsedIntent, original_input: &str) -> bool {
-    match intent.tool.as_str() {
-        "shell" => {
-            if let Some(cmd) = &intent.args.command {
-                handle_shell_dispatch(app, cmd);
-            } else {
-                app.reply("No command specified for shell.");
-            }
-            true
-        }
-        "shell_repeat" => {
-            // Find last shell command in history
-            let last_cmd = app
-                .input_history
-                .iter()
-                .rev()
-                .find(|e| is_shell_command(e))
-                .cloned();
-            if let Some(last_cmd) = last_cmd {
-                app.push_recorded(Role::User, format!("!! → {}", last_cmd));
-                let cmd = last_cmd
-                    .trim()
-                    .strip_prefix('$')
-                    .or_else(|| last_cmd.trim().strip_prefix('!'))
-                    .map(|s| s.trim().to_string())
-                    .unwrap_or(last_cmd.clone());
-                handle_shell_dispatch(app, &cmd);
-            } else {
-                app.reply("No previous shell command in history.");
-            }
-            true
-        }
-        "save_work" => {
-            handle_save_work_intent(app);
-            true
-        }
-        "stage" => {
-            handle_stage_intent(app, &intent.args);
-            true
-        }
-        "commit" => {
-            handle_commit_intent(app);
-            true
-        }
-        "status" => {
-            handle_status_intent(app);
-            true
-        }
-        "find_todos" => {
-            handle_find_todos_intent(app);
-            true
-        }
-        "run_tests" => {
-            handle_run_tests_intent(app);
-            true
-        }
-        "show_file" => {
-            handle_show_file_intent(app, &intent.args, original_input);
-            true
-        }
-        "draft_commit_message" => {
-            handle_draft_commit_intent(app);
-            true
-        }
-        "chat" => false, // Fall through to LLM chat
-        _ => false,
-    }
-}
-
-fn handle_shell_dispatch(app: &mut App, cmd: &str) {
-    if cmd.is_empty() {
-        app.reply("Usage: $ <command> or ! <command>");
-        return;
-    }
-
-    // Handle 'cd' builtin specially
-    if cmd == "cd" || cmd.starts_with("cd ") {
-        handle_cd(app, cmd);
-        return;
-    }
-
-    // Handle 'pwd' as a quick built-in
-    if cmd == "pwd" {
-        app.reply(format!("{}", app.session.cwd.display()));
-        return;
-    }
-
-    // Execute the command in the session's cwd
-    let cwd = app.session.cwd.clone();
-    match run_shell_command(&cwd, cmd) {
-        Ok(output) => {
-            if output.trim().is_empty() {
-                app.reply("(command completed with no output)");
-            } else {
-                app.reply(output);
-            }
-        }
-        Err(err) => {
-            app.reply(format!("Error: {}", format_error(&err)));
-        }
-    }
-}
-
-fn handle_save_work_intent(app: &mut App) {
-    if let Some(repo_root) = app.session.repo_root.clone() {
-        let status_preview = match run_command(&repo_root, "git", &["status", "--short"]) {
-            Ok(out) => out,
-            Err(err) => format!("(git status failed: {err})"),
-        };
-        let plan = [
-            "Planned git workflow:",
-            "• git status (preview)",
-            "• git add -A",
-            "• git commit -m \"<generated message>\"",
-            "• git push",
-            "",
-            "Status preview:",
-            &status_preview,
-            "",
-            "Type 'yes' to run, anything else to cancel.",
-        ]
-        .join("\n");
-        app.reply(plan);
-        app.pending_workflow = Some(WorkflowState {
-            kind: WorkflowKind::SaveWorkPlan,
-            repo_root,
-        });
-    } else {
-        app.reply("No git repository detected; cannot save work.");
-    }
-}
-
-fn handle_stage_intent(app: &mut App, args: &ToolArgs) {
-    let repo_root = app
-        .session
-        .repo_root
-        .clone()
-        .unwrap_or_else(|| app.session.cwd.clone());
-
-    let stage_args = if let Some(path) = &args.path {
-        vec!["add".into(), path.clone()]
-    } else {
-        vec!["add".into(), "-A".into()]
-    };
-
-    let display_args = stage_args.join(" ");
-    app.pending_workflow = Some(WorkflowState {
-        kind: WorkflowKind::StagePlan { args: stage_args },
-        repo_root,
-    });
-    app.reply(format!(
-        "Plan: git {}\nReply 'yes' to run, anything else to cancel.",
-        display_args
-    ));
-}
-
-fn handle_commit_intent(app: &mut App) {
-    if let Some(repo_root) = app.session.repo_root.clone() {
-        let suggested = generate_commit_message(&app.config, &repo_root)
-            .unwrap_or_else(|| "chore: update".to_string());
-        app.pending_workflow = Some(WorkflowState {
-            kind: WorkflowKind::CommitOnlyConfirm {
-                suggested: suggested.clone(),
-            },
-            repo_root,
-        });
-        app.reply(format!(
-            "Staged commit plan:\n- git commit with message:\n{}\n- (push not included)\nReply 'yes' to accept, or type a custom message. 'cancel' to abort.",
-            suggested
-        ));
-    } else {
-        app.reply("No git repository detected; cannot commit.");
-    }
-}
-
-fn handle_status_intent(app: &mut App) {
-    let root = app
-        .session
-        .repo_root
-        .clone()
-        .unwrap_or_else(|| app.session.cwd.clone());
-    let status = run_command(&root, "git", &["status", "--short"])
-        .unwrap_or_else(|e| format!("(git status failed: {})", format_error(&e)));
-    let diffstat = run_command(&root, "git", &["diff", "--stat"])
-        .unwrap_or_else(|e| format!("(git diff --stat failed: {})", format_error(&e)));
-    app.pending_workflow = Some(WorkflowState {
-        kind: WorkflowKind::DiffPreview { file: None },
-        repo_root: root,
-    });
-    app.reply(format!(
-        "Status preview:\n{}\n\nDiff stat:\n{}\nReply with a file path to view its diff, 'yes' to continue, or anything else to cancel.",
-        status, diffstat
-    ));
-}
-
-fn handle_find_todos_intent(app: &mut App) {
-    let root = app
-        .session
-        .repo_root
-        .clone()
-        .unwrap_or_else(|| app.session.cwd.clone());
-    let pattern = r"(?i)^\s*(?://|#|;|<!--|/\*+)\s*(TODO|FIXME)|^\s*(TODO|FIXME)";
-    match run_command(
-        &root,
-        "rg",
-        &["--no-heading", "--line-number", "--pcre2", pattern],
-    ) {
-        Ok(out) if out.trim().is_empty() => app.reply("No TODO/FIXME found."),
-        Ok(out) => app.reply(format!("TODO/FIXME:\n{out}")),
-        Err(err) => app.reply(format!("Search failed: {}", format_error(&err))),
-    }
-}
-
-fn handle_run_tests_intent(app: &mut App) {
-    if let Some(repo_root) = app.session.repo_root.clone() {
-        match run_command(&repo_root, "cargo", &["test"]) {
-            Ok(out) => app.reply(format!("cargo test output:\n{out}")),
-            Err(err) => app.reply(format!("cargo test failed: {}", format_error(&err))),
-        }
-    } else {
-        app.reply("Not in a cargo project; cannot run tests.");
-    }
-}
-
-fn handle_show_file_intent(app: &mut App, args: &ToolArgs, original_input: &str) {
-    // Try to get path from args, or parse from original input
-    let path = args
-        .path
-        .as_ref()
-        .map(PathBuf::from)
-        .or_else(|| parse_show_file(original_input));
-
-    if let Some(path) = path {
-        let resolved = if path.is_absolute() {
-            path
-        } else if let Some(repo) = app.session.repo_root.clone() {
-            repo.join(&path)
-        } else {
-            app.session.cwd.join(&path)
-        };
-
-        match fs::read_to_string(&resolved) {
-            Ok(contents) => app.reply(format!("Contents of {}:\n{}", resolved.display(), contents)),
-            Err(err) => app.reply(format!("Could not read {}: {}", resolved.display(), err)),
-        }
-    } else {
-        app.reply("Please specify a file path to show.");
-    }
-}
-
-fn handle_draft_commit_intent(app: &mut App) {
-    if let Some(repo_root) = app.session.repo_root.clone() {
-        let idx = app.pending_placeholder();
-        let tx = app.assistant_tx.clone();
-        let config = app.config.clone();
-        tokio::spawn(async move {
-            let event = match generate_commit_message_async(&config, &repo_root).await {
-                Some(msg) => AssistantEvent::Completed {
-                    idx,
-                    content: Some(format!("Suggested commit message:\n{msg}")),
-                },
-                None => AssistantEvent::Failed {
-                    idx,
-                    error: "Could not generate commit message (is anything staged?).".into(),
-                },
-            };
-            let _ = tx.send(event);
-        });
-    } else {
-        app.reply("No git repository detected; cannot draft a commit message.");
-    }
-}
-
-fn render_messages(messages: &[Message]) -> Vec<Line<'static>> {
-    let mut rendered = Vec::new();
-    for m in messages {
-        let (label, color) = match m.role {
-            Role::User => ("user", Color::Cyan),
-            Role::Assistant => ("assistant", Color::Green),
-            Role::System => ("system", Color::Yellow),
-        };
-        let label_text = format!("[{label}] ");
-        let body_lines = format_message_body(&m.content);
-
-        for (i, body) in body_lines.into_iter().enumerate() {
-            if i == 0 {
-                rendered.push(Line::from(vec![
-                    Span::styled(label_text.clone(), Style::default().fg(color)),
-                    Span::raw(body),
-                ]));
-            } else {
-                rendered.push(Line::from(vec![
-                    Span::raw(" ".repeat(label_text.len())),
-                    Span::raw(body),
-                ]));
-            }
-        }
-    }
-    rendered
-}
-
-fn format_message_body(content: &str) -> Vec<String> {
-    let mut lines_out = Vec::new();
-
-    for line in content.replace('\r', "").lines() {
-        let trimmed = line.trim_end();
-        if trimmed.contains('•') {
-            lines_out.extend(trimmed.split('•').filter_map(|chunk| {
-                let part = chunk.trim();
-                if part.is_empty() {
-                    None
-                } else {
-                    Some(format!("• {part}"))
-                }
-            }));
-            continue;
-        }
-        lines_out.push(trimmed.to_string());
-    }
-
-    if lines_out.is_empty() {
-        lines_out.push(String::new());
-    }
-
-    lines_out
-}
-
-fn clip_lines_from_bottom<'a>(
-    lines: &'a [Line<'a>],
-    scroll_from_bottom: usize,
-    height: usize,
-) -> Vec<Line<'a>> {
-    if height == 0 {
-        return Vec::new();
-    }
-    let total = lines.len();
-    let max_scroll = total.saturating_sub(height);
-    let offset = scroll_from_bottom.min(max_scroll);
-    let end = total.saturating_sub(offset);
-    let start = end.saturating_sub(height);
-    lines[start..end].to_vec()
-}
-fn generate_commit_message(config: &Config, repo_root: &std::path::Path) -> Option<String> {
-    if !config.generate_commit_message {
-        return None;
-    }
-    let stat = run_command(repo_root, "git", &["diff", "--cached", "--stat"]).ok()?;
-    if stat.trim().is_empty() {
-        return None;
-    }
-    let patch = run_command(
-        repo_root,
-        "git",
-        &["diff", "--cached", "--unified=3", "--max-count=1"],
-    )
-    .unwrap_or_default();
-    let patch_snippet = if patch.len() > 4000 {
-        format!("{}...\n[truncated]", &patch[..4000])
-    } else {
-        patch
-    };
-    let prompt = format!(
-        "Generate a git commit message with:\n- Subject line in imperative mood, <=72 chars, include scope if obvious.\n- Then 1-2 bullet lines summarizing key changes (no line counts or LOC numbers; describe what changed).\nFormat exactly:\nSubject line\n- bullet\n- bullet\nAvoid filler. Staged changes (stat):\n{stat}\n\nPatch snippet:\n{patch_snippet}\n\nReturn only the formatted commit message."
-    );
-    let result = std::process::Command::new("ollama")
-        .arg("run")
-        .arg(&config.model)
-        .arg(prompt)
-        .output()
-        .ok()?;
-
-    if !result.status.success() {
-        return None;
-    }
-    let stdout = String::from_utf8_lossy(&result.stdout).to_string();
-    let trimmed = stdout.trim();
-    if trimmed.is_empty() {
-        None
-    } else {
-        Some(trimmed.to_string())
-    }
-}
-
-async fn generate_commit_message_async(config: &Config, repo_root: &std::path::Path) -> Option<String> {
-    if !config.generate_commit_message {
-        return None;
-    }
-    let stat = run_command(repo_root, "git", &["diff", "--cached", "--stat"]).ok()?;
-    if stat.trim().is_empty() {
-        return None;
-    }
-    let patch = run_command(
-        repo_root,
-        "git",
-        &["diff", "--cached", "--unified=3", "--max-count=1"],
-    )
-    .unwrap_or_default();
-    let patch_snippet = if patch.len() > 4000 {
-        format!("{}...\n[truncated]", &patch[..4000])
-    } else {
-        patch
-    };
-    let prompt = format!(
-        "Generate a git commit message with:\n- Subject line in imperative mood, <=72 chars, include scope if obvious.\n- Then 1-2 bullet lines summarizing key changes (no line counts or LOC numbers; describe what changed).\nFormat exactly:\nSubject line\n- bullet\n- bullet\nAvoid filler. Staged changes (stat):\n{stat}\n\nPatch snippet:\n{patch_snippet}\n\nReturn only the formatted commit message."
-    );
-    let result = TokioCommand::new("ollama")
-        .arg("run")
-        .arg(&config.model)
-        .arg(prompt)
-        .output()
-        .await
-        .ok()?;
-
-    if !result.status.success() {
-        return None;
-    }
-    let stdout = String::from_utf8_lossy(&result.stdout).to_string();
-    let trimmed = stdout.trim();
-    if trimmed.is_empty() {
-        None
-    } else {
-        Some(trimmed.to_string())
-    }
-}
-
-fn split_commit_message(msg: &str) -> (String, Vec<String>) {
-    let mut lines: Vec<String> = msg
-        .lines()
-        .map(|l| l.trim())
-        .filter(|l| !l.is_empty())
-        .map(String::from)
-        .collect();
-    if lines.is_empty() {
-        return ("chore: save work".to_string(), vec![]);
-    }
-    let subject = lines.remove(0);
-    (subject, lines)
 }

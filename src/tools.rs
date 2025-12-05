@@ -27,6 +27,9 @@ pub struct ToolArgs {
     /// Shell command to execute
     #[serde(default)]
     pub command: Option<String>,
+    /// File content (for write operations)
+    #[serde(default)]
+    pub content: Option<String>,
 }
 
 /// All available tools in the system.
@@ -148,6 +151,32 @@ pub static TOOLS: &[Tool] = &[
             "execute command",
             "shell command",
             "run a command",
+        ],
+        requires_repo: false,
+    },
+    Tool {
+        name: "list_files",
+        description: "List files and directories in a given path",
+        examples: &[
+            "list files",
+            "show files",
+            "list directory",
+            "ls",
+            "dir",
+            "list files in src",
+            "show files in this directory",
+        ],
+        requires_repo: false,
+    },
+    Tool {
+        name: "write_file",
+        description: "Create or overwrite a file with given content (requires confirmation)",
+        examples: &[
+            "write file",
+            "create file",
+            "save to file",
+            "write to main.rs",
+            "create new file",
         ],
         requires_repo: false,
     },

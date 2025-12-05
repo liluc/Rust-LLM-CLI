@@ -5,12 +5,18 @@ use clap::{Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
 
 mod app;
+mod commands;
 mod config;
 mod embedding;
+mod file_ops;
+mod handlers;
+mod input;
 mod intent;
 mod ollama;
 mod session;
 mod tools;
+mod ui;
+mod workflow;
 
 #[derive(Debug, Parser)]
 #[command(author, version, about = "LLM-powered CLI (Rust + Ollama)")]
