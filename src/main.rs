@@ -6,8 +6,11 @@ use tracing_subscriber::EnvFilter;
 
 mod app;
 mod config;
+mod embedding;
+mod intent;
 mod ollama;
 mod session;
+mod tools;
 
 #[derive(Debug, Parser)]
 #[command(author, version, about = "LLM-powered CLI (Rust + Ollama)")]

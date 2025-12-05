@@ -27,10 +27,15 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph, Wrap},
 };
 
+use std::sync::Arc;
+
 use crate::{
     config::Config,
+    embedding::EmbeddingCache,
+    intent::{self, ParsedIntent},
     ollama,
     session::{Message, Role, SessionState},
+    tools::ToolArgs,
 };
 
 enum AssistantEvent {
@@ -42,8 +47,17 @@ enum AssistantEvent {
 pub async fn run(config: Config) -> Result<()> {
     ollama::ensure_available(&config.model)?;
 
+    // Initialize embedding cache for semantic intent matching
+    let mut embedding_cache = EmbeddingCache::new(None);
+    eprintln!("Initializing embedding cache (this may take a moment)...");
+    if let Err(e) = embedding_cache.initialize().await {
+        eprintln!("Warning: Could not initialize embeddings: {}. Falling back to direct chat.", e);
+        eprintln!("Tip: Run 'ollama pull nomic-embed-text' to enable semantic matching.");
+    }
+    let embedding_cache = Arc::new(embedding_cache);
+
     let mut terminal = TerminalGuard::new().context("setting up terminal")?;
-    let mut app = App::new(config);
+    let mut app = App::new(config, Arc::clone(&embedding_cache));
     let tick_rate = Duration::from_millis(100);
     let mut last_tick = Instant::now();
 
@@ -114,12 +128,14 @@ struct App {
     pending_workflow: Option<WorkflowState>,
     assistant_tx: mpsc::UnboundedSender<AssistantEvent>,
     assistant_rx: mpsc::UnboundedReceiver<AssistantEvent>,
+    embedding_cache: Arc<EmbeddingCache>,
     should_quit: bool,
 }
 
 impl App {
-    fn new(config: Config) -> Self {
+    fn new(config: Config, embedding_cache: Arc<EmbeddingCache>) -> Self {
         let (assistant_tx, assistant_rx) = mpsc::unbounded_channel();
+        let embeddings_ready = embedding_cache.is_initialized();
         let mut app = Self {
             config,
             session: SessionState::new(),
@@ -132,12 +148,18 @@ impl App {
             pending_workflow: None,
             assistant_tx,
             assistant_rx,
+            embedding_cache,
             should_quit: false,
         };
 
+        let status = if embeddings_ready {
+            "embeddings: ready"
+        } else {
+            "embeddings: disabled"
+        };
         let system_msg = format!(
-            "LLM CLI ready. Model: {} (streaming: {}). Shell: $ <cmd>. Repeat: !!. Type to chat; Enter to submit; Esc/q to exit.",
-            app.config.model, app.config.streaming
+            "LLM CLI ready. Model: {} ({}). Shell: $ <cmd>. Repeat: !!. Type to chat; Enter to submit; Esc/q to exit.",
+            app.config.model, status
         );
         app.push_recorded(Role::System, system_msg);
         app
@@ -203,6 +225,35 @@ impl App {
             .map(|m| m.content.clone())
             .unwrap_or_default();
         let final_content = content.unwrap_or(fallback);
+
+        // Check for intent signal from background task
+        if final_content.starts_with("__INTENT__:") {
+            self.pending_idxs.retain(|&i| i != idx);
+            // Remove the placeholder message
+            if idx < self.messages.len() {
+                self.messages.remove(idx);
+            }
+            // Parse and dispatch the intent
+            let parts: Vec<&str> = final_content.splitn(3, ':').collect();
+            if parts.len() >= 2 {
+                let tool = parts[1];
+                let args_json = parts.get(2).unwrap_or(&"{}");
+                let args: ToolArgs = serde_json::from_str(args_json).unwrap_or_default();
+                let intent = ParsedIntent {
+                    tool: tool.to_string(),
+                    args,
+                    confidence: 0.8,
+                };
+                // We need to get the original input from history
+                let original_input = self
+                    .input_history
+                    .last()
+                    .cloned()
+                    .unwrap_or_default();
+                dispatch_intent(self, &intent, &original_input);
+            }
+            return;
+        }
 
         self.upsert_message(idx, Role::Assistant, final_content.clone());
         self.session.record(Message {
@@ -282,9 +333,14 @@ fn submit_input(app: &mut App) {
         // Show what we're expanding to
         app.push_recorded(Role::User, format!("{} → {}", raw_input, &expanded));
         // Execute the expanded command (it's a shell command)
-        if maybe_handle_shell_command(app, &expanded) {
-            return;
-        }
+        let cmd = expanded
+            .trim()
+            .strip_prefix('$')
+            .or_else(|| expanded.trim().strip_prefix('!'))
+            .map(|s| s.trim())
+            .unwrap_or(&expanded);
+        handle_shell_dispatch(app, cmd);
+        return;
     }
 
     let prompt = raw_input;
@@ -293,21 +349,29 @@ fn submit_input(app: &mut App) {
         app.input_history.push(prompt.clone());
     }
 
+    // Handle pending workflow confirmations first
     if let Some(workflow) = app.pending_workflow.take() {
         handle_workflow_response(app, workflow, &prompt);
         return;
     }
 
-    // Check for shell commands ($ or ! prefix)
-    if maybe_handle_shell_command(app, &prompt) {
-        return;
+    // Try quick match first for common phrases (instant, no API call)
+    if let Some(intent) = intent::quick_match(&prompt) {
+        if dispatch_intent(app, &intent, &prompt) {
+            return;
+        }
     }
 
-    if maybe_handle_intent(app, &prompt) {
-        return;
-    }
+    // Use embedding-based intent matching in background
+    let tx = app.assistant_tx.clone();
+    let model = app.config.model.clone();
+    let system_prompt = app.config.system_prompt.clone();
+    let timeout_secs = app.config.request_timeout_secs;
+    let prompt_for_task = prompt.clone();
+    let embedding_cache = Arc::clone(&app.embedding_cache);
+    let use_embeddings = app.embedding_cache.is_initialized();
 
-    // Insert placeholder assistant message and spawn background generation.
+    // Insert placeholder for response
     let placeholder_idx = app.messages.len();
     app.messages.push(Message {
         role: Role::Assistant,
@@ -315,12 +379,26 @@ fn submit_input(app: &mut App) {
     });
     app.pending_idxs.push(placeholder_idx);
 
-    let tx = app.assistant_tx.clone();
-    let model = app.config.model.clone();
-    let system_prompt = app.config.system_prompt.clone();
-    let timeout_secs = app.config.request_timeout_secs;
-    let prompt_for_task = prompt.clone();
     tokio::spawn(async move {
+        // Try embedding-based intent matching if available
+        if use_embeddings {
+            if let Ok(parsed) = intent::parse_intent_with_embeddings(&embedding_cache, &prompt_for_task).await {
+                // Non-chat intents get dispatched via signal to main thread
+                if parsed.tool != "chat" && parsed.confidence >= 0.5 {
+                    let _ = tx.send(AssistantEvent::Completed {
+                        idx: placeholder_idx,
+                        content: Some(format!(
+                            "__INTENT__:{}:{}",
+                            parsed.tool,
+                            serde_json::to_string(&parsed.args).unwrap_or_default()
+                        )),
+                    });
+                    return;
+                }
+            }
+        }
+
+        // Fall through to regular LLM chat
         let composed_prompt = format!(
             "{}\n\nUser: {}\nAssistant:",
             system_prompt, prompt_for_task
@@ -381,7 +459,6 @@ fn submit_input(app: &mut App) {
 
         match child.wait().await {
             Ok(status) if status.success() => {
-                // Finalize content (already accumulated in tokens)
                 let _ = tx.send(AssistantEvent::Completed {
                     idx: placeholder_idx,
                     content: None,
@@ -683,10 +760,6 @@ fn handle_workflow_response(app: &mut App, workflow: WorkflowState, prompt: &str
             logs.push("Commit completed (no push).".to_string());
             app.reply(logs.join("\n"));
         }
-        WorkflowKind::CommitOnlyPlan => {
-            // Should be replaced immediately by CommitOnlyConfirm in intent handler; keep as guard.
-            app.reply("Please provide or confirm a commit message.".to_string());
-        }
     }
 }
 
@@ -791,58 +864,9 @@ struct WorkflowState {
 enum WorkflowKind {
     SaveWorkPlan,
     SaveWorkCommit { suggested: String },
-    CommitOnlyPlan,
     CommitOnlyConfirm { suggested: String },
     StagePlan { args: Vec<String> },
     DiffPreview { file: Option<String> },
-}
-
-/// Handle shell commands prefixed with '$' or '!'.
-/// Returns true if the input was a shell command.
-fn maybe_handle_shell_command(app: &mut App, prompt: &str) -> bool {
-    let trimmed = prompt.trim();
-    
-    // Check for shell command prefix
-    let shell_cmd = if let Some(cmd) = trimmed.strip_prefix('$') {
-        cmd.trim()
-    } else if let Some(cmd) = trimmed.strip_prefix('!') {
-        cmd.trim()
-    } else {
-        return false;
-    };
-
-    if shell_cmd.is_empty() {
-        app.reply("Usage: $ <command> or ! <command>");
-        return true;
-    }
-
-    // Handle 'cd' builtin specially - it needs to change session state
-    if shell_cmd == "cd" || shell_cmd.starts_with("cd ") {
-        handle_cd(app, shell_cmd);
-        return true;
-    }
-
-    // Handle 'pwd' as a quick built-in
-    if shell_cmd == "pwd" {
-        app.reply(format!("{}", app.session.cwd.display()));
-        return true;
-    }
-
-    // Execute the command in the session's cwd
-    let cwd = app.session.cwd.clone();
-    match run_shell_command(&cwd, shell_cmd) {
-        Ok(output) => {
-            if output.trim().is_empty() {
-                app.reply("(command completed with no output)");
-            } else {
-                app.reply(output);
-            }
-        }
-        Err(err) => {
-            app.reply(format!("Error: {}", format_error(&err)));
-        }
-    }
-    true
 }
 
 fn handle_cd(app: &mut App, cmd: &str) {
@@ -917,222 +941,6 @@ fn run_shell_command(cwd: &std::path::Path, cmd: &str) -> Result<String> {
     Ok(result.trim().to_string())
 }
 
-fn maybe_handle_intent(app: &mut App, prompt: &str) -> bool {
-    let normalized = prompt.to_lowercase();
-    if normalized.contains("save work") {
-        if let Some(repo_root) = app.session.repo_root.clone() {
-            let status_preview = match run_command(&repo_root, "git", &["status", "--short"]) {
-                Ok(out) => out,
-                Err(err) => format!("(git status failed: {err})"),
-            };
-            let plan = [
-                "Planned git workflow:",
-                "• git status (preview)",
-                "• git add -A",
-                "• git commit -m \"chore: save work\"",
-                "• git push",
-                "",
-                "Status preview:",
-                &status_preview,
-                "",
-                "Type 'yes' to run, anything else to cancel.",
-            ]
-            .join("\n");
-            app.reply(plan);
-            app.pending_workflow = Some(WorkflowState {
-                kind: WorkflowKind::SaveWorkPlan,
-                repo_root,
-            });
-        } else {
-            app.reply("No git repository detected; cannot save work.".to_string());
-        }
-        return true;
-    }
-
-    if normalized.starts_with("stage all")
-        || normalized == "stage"
-        || normalized.starts_with("git add -a")
-        || normalized.starts_with("git add -A")
-    {
-        app.pending_workflow = Some(WorkflowState {
-            kind: WorkflowKind::StagePlan {
-                args: vec!["add".into(), "-A".into()],
-            },
-            repo_root: app
-                .session
-                .repo_root
-                .clone()
-                .unwrap_or_else(|| app.session.cwd.clone()),
-        });
-        app.reply("Plan: git add -A\nReply 'yes' to run, anything else to cancel.");
-        return true;
-    }
-
-    if normalized.starts_with("stage ") || normalized.starts_with("git add ") {
-        let parts: Vec<&str> = prompt.splitn(2, char::is_whitespace).collect();
-        if parts.len() == 2 {
-            let path = parts[1].trim();
-            if !path.is_empty() {
-                app.pending_workflow = Some(WorkflowState {
-                    kind: WorkflowKind::StagePlan {
-                        args: vec!["add".into(), path.to_string()],
-                    },
-                    repo_root: app
-                        .session
-                        .repo_root
-                        .clone()
-                        .unwrap_or_else(|| app.session.cwd.clone()),
-                });
-                app.reply(format!(
-                    "Plan: git add {}\nReply 'yes' to run, anything else to cancel.",
-                    path
-                ));
-                return true;
-            }
-        }
-        app.reply("No path provided to stage.".to_string());
-        return true;
-    }
-
-    if normalized.contains("git status") || normalized == "status" {
-        let root = app
-            .session
-            .repo_root
-            .clone()
-            .unwrap_or_else(|| app.session.cwd.clone());
-        let status = run_command(&root, "git", &["status", "--short"])
-            .unwrap_or_else(|e| format!("(git status failed: {})", format_error(&e)));
-        let diffstat = run_command(&root, "git", &["diff", "--stat"])
-            .unwrap_or_else(|e| format!("(git diff --stat failed: {})", format_error(&e)));
-        app.pending_workflow = Some(WorkflowState {
-            kind: WorkflowKind::DiffPreview { file: None },
-            repo_root: root.clone(),
-        });
-        app.reply(format!(
-            "Status preview:\n{}\n\nDiff stat:\n{}\nReply with a file path to view its diff, 'yes' to continue, or anything else to cancel.",
-            status, diffstat
-        ));
-        return true;
-    }
-
-    if normalized.starts_with("commit ")
-        || normalized == "commit"
-        || normalized.contains("commit only")
-    {
-        if let Some(repo_root) = app.session.repo_root.clone() {
-            let suggested = generate_commit_message(&app.config, &repo_root)
-                .unwrap_or_else(|| "chore: update".to_string());
-            app.pending_workflow = Some(WorkflowState {
-                kind: WorkflowKind::CommitOnlyPlan,
-                repo_root,
-            });
-            app.reply(format!(
-                "Staged commit plan:\n- git commit with message:\n{}\n- (push not included)\nReply 'yes' to accept, or type a custom message. 'cancel' to abort.",
-                suggested
-            ));
-            // store suggestion in pending_workflow state
-            app.pending_workflow = Some(WorkflowState {
-                kind: WorkflowKind::CommitOnlyConfirm { suggested },
-                repo_root: app.session.repo_root.clone().unwrap(),
-            });
-        } else {
-            app.reply("No git repository detected; cannot commit.".to_string());
-        }
-        return true;
-    }
-
-    if normalized.contains("git status") || normalized == "status" {
-        if let Some(repo_root) = app.session.repo_root.clone() {
-            match run_command(&repo_root, "git", &["status"]) {
-                Ok(out) => app.reply(out),
-                Err(err) => app.reply(format!("git status failed: {}", format_error(&err))),
-            }
-        } else {
-            app.reply("No git repository detected.".to_string());
-        }
-        return true;
-    }
-
-    if normalized.contains("find todos")
-        || normalized.contains("find todo")
-        || normalized == "todos"
-        || normalized.contains("todo")
-    {
-        let root = app
-            .session
-            .repo_root
-            .clone()
-            .unwrap_or_else(|| app.session.cwd.clone());
-        let pattern = r"(?i)^\s*(?://|#|;|<!--|/\*+)\s*(TODO|FIXME)|^\s*(TODO|FIXME)";
-        match run_command(
-            &root,
-            "rg",
-            &["--no-heading", "--line-number", "--pcre2", pattern],
-        ) {
-            Ok(out) if out.trim().is_empty() => app.reply("No TODO/FIXME found.".to_string()),
-            Ok(out) => app.reply(format!("TODO/FIXME:\n{out}")),
-            Err(err) => app.reply(format!("Search failed: {}", format_error(&err))),
-        }
-        return true;
-    }
-
-    if normalized.contains("run tests") || normalized.contains("run test") || normalized == "tests"
-    {
-        if let Some(repo_root) = app.session.repo_root.clone() {
-            match run_command(&repo_root, "cargo", &["test"]) {
-                Ok(out) => app.reply(format!("cargo test output:\n{out}")),
-                Err(err) => app.reply(format!("cargo test failed: {}", format_error(&err))),
-            }
-        } else {
-            app.reply("Not in a cargo project; cannot run tests.".to_string());
-        }
-        return true;
-    }
-
-    if normalized.contains("draft commit") || normalized.contains("commit message") {
-        if let Some(repo_root) = app.session.repo_root.clone() {
-            // Show placeholder and compute in background.
-            let idx = app.pending_placeholder();
-            let tx = app.assistant_tx.clone();
-            let config = app.config.clone();
-            tokio::spawn(async move {
-                let event = match generate_commit_message_async(&config, &repo_root).await {
-                    Some(msg) => AssistantEvent::Completed {
-                        idx,
-                        content: Some(format!("Suggested commit message:\n{msg}")),
-                    },
-                    None => AssistantEvent::Failed {
-                        idx,
-                        error: "Could not generate commit message (is anything staged?).".into(),
-                    },
-                };
-                let _ = tx.send(event);
-            });
-        } else {
-            app.reply("No git repository detected; cannot draft a commit message.".to_string());
-        }
-        return true;
-    }
-
-    if let Some(path) = parse_show_file(prompt) {
-        let resolved = if path.is_absolute() {
-            path
-        } else if let Some(repo) = app.session.repo_root.clone() {
-            repo.join(path)
-        } else {
-            app.session.cwd.join(path)
-        };
-
-        match fs::read_to_string(&resolved) {
-            Ok(contents) => app.reply(format!("Contents of {}:\n{}", resolved.display(), contents)),
-            Err(err) => app.reply(format!("Could not read {}: {}", resolved.display(), err)),
-        }
-        return true;
-    }
-
-    false
-}
-
 fn parse_show_file(prompt: &str) -> Option<PathBuf> {
     let lower = prompt.to_lowercase();
     let prefixes = ["show file ", "read file ", "open file ", "show "];
@@ -1145,6 +953,281 @@ fn parse_show_file(prompt: &str) -> Option<PathBuf> {
         }
     }
     None
+}
+
+/// Dispatch a parsed intent to the appropriate handler.
+/// Returns true if the intent was handled, false if it should fall through to chat.
+fn dispatch_intent(app: &mut App, intent: &ParsedIntent, original_input: &str) -> bool {
+    match intent.tool.as_str() {
+        "shell" => {
+            if let Some(cmd) = &intent.args.command {
+                handle_shell_dispatch(app, cmd);
+            } else {
+                app.reply("No command specified for shell.");
+            }
+            true
+        }
+        "shell_repeat" => {
+            // Find last shell command in history
+            let last_cmd = app
+                .input_history
+                .iter()
+                .rev()
+                .find(|e| is_shell_command(e))
+                .cloned();
+            if let Some(last_cmd) = last_cmd {
+                app.push_recorded(Role::User, format!("!! → {}", last_cmd));
+                let cmd = last_cmd
+                    .trim()
+                    .strip_prefix('$')
+                    .or_else(|| last_cmd.trim().strip_prefix('!'))
+                    .map(|s| s.trim().to_string())
+                    .unwrap_or(last_cmd.clone());
+                handle_shell_dispatch(app, &cmd);
+            } else {
+                app.reply("No previous shell command in history.");
+            }
+            true
+        }
+        "save_work" => {
+            handle_save_work_intent(app);
+            true
+        }
+        "stage" => {
+            handle_stage_intent(app, &intent.args);
+            true
+        }
+        "commit" => {
+            handle_commit_intent(app);
+            true
+        }
+        "status" => {
+            handle_status_intent(app);
+            true
+        }
+        "find_todos" => {
+            handle_find_todos_intent(app);
+            true
+        }
+        "run_tests" => {
+            handle_run_tests_intent(app);
+            true
+        }
+        "show_file" => {
+            handle_show_file_intent(app, &intent.args, original_input);
+            true
+        }
+        "draft_commit_message" => {
+            handle_draft_commit_intent(app);
+            true
+        }
+        "chat" => false, // Fall through to LLM chat
+        _ => false,
+    }
+}
+
+fn handle_shell_dispatch(app: &mut App, cmd: &str) {
+    if cmd.is_empty() {
+        app.reply("Usage: $ <command> or ! <command>");
+        return;
+    }
+
+    // Handle 'cd' builtin specially
+    if cmd == "cd" || cmd.starts_with("cd ") {
+        handle_cd(app, cmd);
+        return;
+    }
+
+    // Handle 'pwd' as a quick built-in
+    if cmd == "pwd" {
+        app.reply(format!("{}", app.session.cwd.display()));
+        return;
+    }
+
+    // Execute the command in the session's cwd
+    let cwd = app.session.cwd.clone();
+    match run_shell_command(&cwd, cmd) {
+        Ok(output) => {
+            if output.trim().is_empty() {
+                app.reply("(command completed with no output)");
+            } else {
+                app.reply(output);
+            }
+        }
+        Err(err) => {
+            app.reply(format!("Error: {}", format_error(&err)));
+        }
+    }
+}
+
+fn handle_save_work_intent(app: &mut App) {
+    if let Some(repo_root) = app.session.repo_root.clone() {
+        let status_preview = match run_command(&repo_root, "git", &["status", "--short"]) {
+            Ok(out) => out,
+            Err(err) => format!("(git status failed: {err})"),
+        };
+        let plan = [
+            "Planned git workflow:",
+            "• git status (preview)",
+            "• git add -A",
+            "• git commit -m \"<generated message>\"",
+            "• git push",
+            "",
+            "Status preview:",
+            &status_preview,
+            "",
+            "Type 'yes' to run, anything else to cancel.",
+        ]
+        .join("\n");
+        app.reply(plan);
+        app.pending_workflow = Some(WorkflowState {
+            kind: WorkflowKind::SaveWorkPlan,
+            repo_root,
+        });
+    } else {
+        app.reply("No git repository detected; cannot save work.");
+    }
+}
+
+fn handle_stage_intent(app: &mut App, args: &ToolArgs) {
+    let repo_root = app
+        .session
+        .repo_root
+        .clone()
+        .unwrap_or_else(|| app.session.cwd.clone());
+
+    let stage_args = if let Some(path) = &args.path {
+        vec!["add".into(), path.clone()]
+    } else {
+        vec!["add".into(), "-A".into()]
+    };
+
+    let display_args = stage_args.join(" ");
+    app.pending_workflow = Some(WorkflowState {
+        kind: WorkflowKind::StagePlan { args: stage_args },
+        repo_root,
+    });
+    app.reply(format!(
+        "Plan: git {}\nReply 'yes' to run, anything else to cancel.",
+        display_args
+    ));
+}
+
+fn handle_commit_intent(app: &mut App) {
+    if let Some(repo_root) = app.session.repo_root.clone() {
+        let suggested = generate_commit_message(&app.config, &repo_root)
+            .unwrap_or_else(|| "chore: update".to_string());
+        app.pending_workflow = Some(WorkflowState {
+            kind: WorkflowKind::CommitOnlyConfirm {
+                suggested: suggested.clone(),
+            },
+            repo_root,
+        });
+        app.reply(format!(
+            "Staged commit plan:\n- git commit with message:\n{}\n- (push not included)\nReply 'yes' to accept, or type a custom message. 'cancel' to abort.",
+            suggested
+        ));
+    } else {
+        app.reply("No git repository detected; cannot commit.");
+    }
+}
+
+fn handle_status_intent(app: &mut App) {
+    let root = app
+        .session
+        .repo_root
+        .clone()
+        .unwrap_or_else(|| app.session.cwd.clone());
+    let status = run_command(&root, "git", &["status", "--short"])
+        .unwrap_or_else(|e| format!("(git status failed: {})", format_error(&e)));
+    let diffstat = run_command(&root, "git", &["diff", "--stat"])
+        .unwrap_or_else(|e| format!("(git diff --stat failed: {})", format_error(&e)));
+    app.pending_workflow = Some(WorkflowState {
+        kind: WorkflowKind::DiffPreview { file: None },
+        repo_root: root,
+    });
+    app.reply(format!(
+        "Status preview:\n{}\n\nDiff stat:\n{}\nReply with a file path to view its diff, 'yes' to continue, or anything else to cancel.",
+        status, diffstat
+    ));
+}
+
+fn handle_find_todos_intent(app: &mut App) {
+    let root = app
+        .session
+        .repo_root
+        .clone()
+        .unwrap_or_else(|| app.session.cwd.clone());
+    let pattern = r"(?i)^\s*(?://|#|;|<!--|/\*+)\s*(TODO|FIXME)|^\s*(TODO|FIXME)";
+    match run_command(
+        &root,
+        "rg",
+        &["--no-heading", "--line-number", "--pcre2", pattern],
+    ) {
+        Ok(out) if out.trim().is_empty() => app.reply("No TODO/FIXME found."),
+        Ok(out) => app.reply(format!("TODO/FIXME:\n{out}")),
+        Err(err) => app.reply(format!("Search failed: {}", format_error(&err))),
+    }
+}
+
+fn handle_run_tests_intent(app: &mut App) {
+    if let Some(repo_root) = app.session.repo_root.clone() {
+        match run_command(&repo_root, "cargo", &["test"]) {
+            Ok(out) => app.reply(format!("cargo test output:\n{out}")),
+            Err(err) => app.reply(format!("cargo test failed: {}", format_error(&err))),
+        }
+    } else {
+        app.reply("Not in a cargo project; cannot run tests.");
+    }
+}
+
+fn handle_show_file_intent(app: &mut App, args: &ToolArgs, original_input: &str) {
+    // Try to get path from args, or parse from original input
+    let path = args
+        .path
+        .as_ref()
+        .map(PathBuf::from)
+        .or_else(|| parse_show_file(original_input));
+
+    if let Some(path) = path {
+        let resolved = if path.is_absolute() {
+            path
+        } else if let Some(repo) = app.session.repo_root.clone() {
+            repo.join(&path)
+        } else {
+            app.session.cwd.join(&path)
+        };
+
+        match fs::read_to_string(&resolved) {
+            Ok(contents) => app.reply(format!("Contents of {}:\n{}", resolved.display(), contents)),
+            Err(err) => app.reply(format!("Could not read {}: {}", resolved.display(), err)),
+        }
+    } else {
+        app.reply("Please specify a file path to show.");
+    }
+}
+
+fn handle_draft_commit_intent(app: &mut App) {
+    if let Some(repo_root) = app.session.repo_root.clone() {
+        let idx = app.pending_placeholder();
+        let tx = app.assistant_tx.clone();
+        let config = app.config.clone();
+        tokio::spawn(async move {
+            let event = match generate_commit_message_async(&config, &repo_root).await {
+                Some(msg) => AssistantEvent::Completed {
+                    idx,
+                    content: Some(format!("Suggested commit message:\n{msg}")),
+                },
+                None => AssistantEvent::Failed {
+                    idx,
+                    error: "Could not generate commit message (is anything staged?).".into(),
+                },
+            };
+            let _ = tx.send(event);
+        });
+    } else {
+        app.reply("No git repository detected; cannot draft a commit message.");
+    }
 }
 
 fn render_messages(messages: &[Message]) -> Vec<Line<'static>> {
