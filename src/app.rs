@@ -103,7 +103,8 @@ impl TerminalGuard {
         let mut stdout = stdout();
         execute!(stdout, EnterAlternateScreen).context("enter alternate screen")?;
         let backend = CrosstermBackend::new(stdout);
-        let terminal = Terminal::new(backend).context("create terminal")?;
+        let mut terminal = Terminal::new(backend).context("create terminal")?;
+        terminal.show_cursor().context("show cursor")?;
         Ok(Self { terminal })
     }
 }
@@ -114,6 +115,12 @@ impl Drop for TerminalGuard {
         let _ = execute!(self.terminal.backend_mut(), LeaveAlternateScreen);
         let _ = self.terminal.show_cursor();
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InputMode {
+    Chat,
+    Shell,
 }
 
 struct App {
@@ -129,6 +136,7 @@ struct App {
     assistant_tx: mpsc::UnboundedSender<AssistantEvent>,
     assistant_rx: mpsc::UnboundedReceiver<AssistantEvent>,
     embedding_cache: Arc<EmbeddingCache>,
+    input_mode: InputMode,
     should_quit: bool,
 }
 
@@ -149,6 +157,7 @@ impl App {
             assistant_tx,
             assistant_rx,
             embedding_cache,
+            input_mode: InputMode::Chat,
             should_quit: false,
         };
 
@@ -158,7 +167,7 @@ impl App {
             "embeddings: disabled"
         };
         let system_msg = format!(
-            "LLM CLI ready. Model: {} ({}). Shell: $ <cmd>. Repeat: !!. Type to chat; Enter to submit; Esc/q to exit.",
+            "LLM CLI ready. Model: {} ({}). Modes: Chat/Shell (Ctrl+S). History: ↑/↓. Enter to submit; Esc/q to exit.",
             app.config.model, status
         );
         app.push_recorded(Role::System, system_msg);
@@ -288,26 +297,27 @@ fn handle_key_event(app: &mut App, key: crossterm::event::KeyEvent) {
         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             app.should_quit = true
         }
+        KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            // Toggle input mode
+            app.input_mode = match app.input_mode {
+                InputMode::Chat => InputMode::Shell,
+                InputMode::Shell => InputMode::Chat,
+            };
+        }
         KeyCode::Char('q') => app.should_quit = true,
         KeyCode::Esc => app.should_quit = true,
         KeyCode::Enter => submit_input(app),
         KeyCode::Up => {
-            app.scroll = app.scroll.saturating_add(1);
+            recall_history_prev(app);
         }
         KeyCode::Down => {
-            app.scroll = app.scroll.saturating_sub(1);
+            recall_history_next(app);
         }
         KeyCode::PageUp => {
             app.scroll = app.scroll.saturating_add(10);
         }
         KeyCode::PageDown => {
             app.scroll = app.scroll.saturating_sub(10);
-        }
-        KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            recall_history_prev(app);
-        }
-        KeyCode::Char('n') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            recall_history_next(app);
         }
         KeyCode::Backspace => {
             app.input.pop();
@@ -345,8 +355,15 @@ fn submit_input(app: &mut App) {
 
     let prompt = raw_input;
     app.push_recorded(Role::User, prompt.clone());
-    if app.input_history.last().map_or(true, |s| s != &prompt) {
-        app.input_history.push(prompt.clone());
+    
+    // Store in history with mode marker for filtering
+    let history_entry = if app.input_mode == InputMode::Shell {
+        format!("$ {}", prompt) // Mark as shell command internally
+    } else {
+        prompt.clone()
+    };
+    if app.input_history.last().map_or(true, |s| s != &history_entry) {
+        app.input_history.push(history_entry);
     }
 
     // Handle pending workflow confirmations first
@@ -355,7 +372,13 @@ fn submit_input(app: &mut App) {
         return;
     }
 
-    // Try quick match first for common phrases (instant, no API call)
+    // If in Shell mode, execute as shell command directly
+    if app.input_mode == InputMode::Shell {
+        handle_shell_dispatch(app, &prompt);
+        return;
+    }
+
+    // In Chat mode: try quick match first (for $ prefix and !! shortcuts)
     if let Some(intent) = intent::quick_match(&prompt) {
         if dispatch_intent(app, &intent, &prompt) {
             return;
@@ -509,12 +532,22 @@ fn ui(f: &mut ratatui::Frame, app: &App) {
         .wrap(Wrap { trim: true });
     f.render_widget(log, chunks[0]);
 
+    let mode_indicator = match app.input_mode {
+        InputMode::Chat => "Chat Mode (Ctrl+S for Shell)",
+        InputMode::Shell => "Shell Mode (Ctrl+S for Chat)",
+    };
     let input = Paragraph::new(app.input.as_str()).block(
         Block::default()
             .borders(Borders::ALL)
-            .title("Input (Enter to submit)"),
+            .title(format!("Input: {} | Enter to submit", mode_indicator)),
     );
     f.render_widget(input, chunks[1]);
+
+    // Position cursor at the end of input text
+    // +1 for border, +1 for the position after last character
+    let cursor_x = chunks[1].x + app.input.len() as u16 + 1;
+    let cursor_y = chunks[1].y + 1; // +1 for top border
+    f.set_cursor(cursor_x, cursor_y);
 
     let status_text = Line::from(vec![
         Span::raw("model: "),
@@ -535,16 +568,10 @@ fn ui(f: &mut ratatui::Frame, app: &App) {
             "-"
         })
         .bold(),
-        Span::raw(" | shell: $ or ! | !! repeat | history: Ctrl+P/N | quit: Esc/q"),
+        Span::raw(" | mode: Ctrl+S | history: ↑/↓ | scroll: PgUp/PgDn | quit: Esc/q"),
     ]);
     let status = Paragraph::new(status_text);
     f.render_widget(status, chunks[2]);
-}
-
-/// Check if the input indicates shell command mode.
-fn is_shell_prefix(input: &str) -> bool {
-    let trimmed = input.trim();
-    trimmed.starts_with('$') || trimmed.starts_with('!')
 }
 
 /// Check if a history entry is a shell command.
@@ -593,15 +620,27 @@ fn recall_history_prev(app: &mut App) {
         return;
     }
     
-    let filter_shell = is_shell_prefix(&app.input);
+    // Filter history based on current mode
+    let filter_by_mode = app.input_mode == InputMode::Shell;
     let start = app.history_idx.map(|i| i.saturating_sub(1)).unwrap_or(app.input_history.len().saturating_sub(1));
     
     // Search backwards for a matching entry
     for i in (0..=start).rev() {
         if let Some(entry) = app.input_history.get(i) {
-            if !filter_shell || is_shell_command(entry) {
+            let is_shell = is_shell_command(entry);
+            // In Shell mode, show only shell commands; in Chat mode, show only non-shell
+            let matches_mode = if filter_by_mode { is_shell } else { !is_shell };
+            if matches_mode {
                 app.history_idx = Some(i);
-                app.input = entry.clone();
+                // Strip $ prefix in Shell mode for cleaner display
+                app.input = if filter_by_mode {
+                    entry.trim().strip_prefix('$')
+                        .or_else(|| entry.trim().strip_prefix('!'))
+                        .map(|s| s.trim().to_string())
+                        .unwrap_or_else(|| entry.clone())
+                } else {
+                    entry.clone()
+                };
                 return;
             }
         }
@@ -614,7 +653,7 @@ fn recall_history_next(app: &mut App) {
         return;
     }
     
-    let filter_shell = is_shell_prefix(&app.input);
+    let filter_by_mode = app.input_mode == InputMode::Shell;
     let start = match app.history_idx {
         None => return,
         Some(i) => i + 1,
@@ -623,9 +662,20 @@ fn recall_history_next(app: &mut App) {
     // Search forwards for a matching entry
     for i in start..app.input_history.len() {
         if let Some(entry) = app.input_history.get(i) {
-            if !filter_shell || is_shell_command(entry) {
+            let is_shell = is_shell_command(entry);
+            // In Shell mode, show only shell commands; in Chat mode, show only non-shell
+            let matches_mode = if filter_by_mode { is_shell } else { !is_shell };
+            if matches_mode {
                 app.history_idx = Some(i);
-                app.input = entry.clone();
+                // Strip $ prefix in Shell mode for cleaner display
+                app.input = if filter_by_mode {
+                    entry.trim().strip_prefix('$')
+                        .or_else(|| entry.trim().strip_prefix('!'))
+                        .map(|s| s.trim().to_string())
+                        .unwrap_or_else(|| entry.clone())
+                } else {
+                    entry.clone()
+                };
                 return;
             }
         }
