@@ -136,7 +136,7 @@ impl App {
         };
 
         let system_msg = format!(
-            "LLM CLI ready. Model: {} (streaming: {}). Type to chat; Enter to submit; Esc/q/Ctrl+C to exit.",
+            "LLM CLI ready. Model: {} (streaming: {}). Shell: $ <cmd>. Repeat: !!. Type to chat; Enter to submit; Esc/q to exit.",
             app.config.model, app.config.streaming
         );
         app.push_recorded(Role::System, system_msg);
@@ -273,16 +273,33 @@ fn submit_input(app: &mut App) {
         return;
     }
 
-    let prompt = app.input.trim().to_string();
+    let raw_input = app.input.trim().to_string();
+    app.history_idx = None;
+    app.input.clear();
+
+    // Handle bang shortcuts (!! and !prefix)
+    if let Some(expanded) = expand_bang_shortcut(&app.input_history, &raw_input) {
+        // Show what we're expanding to
+        app.push_recorded(Role::User, format!("{} → {}", raw_input, &expanded));
+        // Execute the expanded command (it's a shell command)
+        if maybe_handle_shell_command(app, &expanded) {
+            return;
+        }
+    }
+
+    let prompt = raw_input;
     app.push_recorded(Role::User, prompt.clone());
     if app.input_history.last().map_or(true, |s| s != &prompt) {
         app.input_history.push(prompt.clone());
     }
-    app.history_idx = None;
-    app.input.clear();
 
     if let Some(workflow) = app.pending_workflow.take() {
         handle_workflow_response(app, workflow, &prompt);
+        return;
+    }
+
+    // Check for shell commands ($ or ! prefix)
+    if maybe_handle_shell_command(app, &prompt) {
         return;
     }
 
@@ -441,44 +458,105 @@ fn ui(f: &mut ratatui::Frame, app: &App) {
             "-"
         })
         .bold(),
-        Span::raw(" | history: Ctrl+P/Ctrl+N | quit: Esc/q/Ctrl+C"),
+        Span::raw(" | shell: $ or ! | !! repeat | history: Ctrl+P/N | quit: Esc/q"),
     ]);
     let status = Paragraph::new(status_text);
     f.render_widget(status, chunks[2]);
+}
+
+/// Check if the input indicates shell command mode.
+fn is_shell_prefix(input: &str) -> bool {
+    let trimmed = input.trim();
+    trimmed.starts_with('$') || trimmed.starts_with('!')
+}
+
+/// Check if a history entry is a shell command.
+fn is_shell_command(entry: &str) -> bool {
+    let trimmed = entry.trim();
+    trimmed.starts_with('$') || trimmed.starts_with('!')
+}
+
+/// Expand bash-style bang shortcuts.
+/// Returns Some(expanded_command) if a shortcut was matched, None otherwise.
+fn expand_bang_shortcut(history: &[String], input: &str) -> Option<String> {
+    let trimmed = input.trim();
+    
+    // !! - repeat last shell command
+    if trimmed == "!!" {
+        return history
+            .iter()
+            .rev()
+            .find(|e| is_shell_command(e))
+            .cloned();
+    }
+    
+    // !prefix - find last command starting with prefix (after the !)
+    if trimmed.starts_with('!') && trimmed.len() > 1 && !trimmed.starts_with("! ") {
+        let prefix = &trimmed[1..];
+        // Look for shell commands whose command part starts with prefix
+        for entry in history.iter().rev() {
+            if is_shell_command(entry) {
+                // Extract the command part after $ or !
+                let cmd_part = entry.trim().strip_prefix('$')
+                    .or_else(|| entry.trim().strip_prefix('!'))
+                    .map(|s| s.trim())
+                    .unwrap_or("");
+                if cmd_part.starts_with(prefix) {
+                    return Some(entry.clone());
+                }
+            }
+        }
+    }
+    
+    None
 }
 
 fn recall_history_prev(app: &mut App) {
     if app.input_history.is_empty() {
         return;
     }
-    let next_idx = match app.history_idx {
-        None => app.input_history.len().saturating_sub(1),
-        Some(0) => 0,
-        Some(i) => i.saturating_sub(1),
-    };
-    app.history_idx = Some(next_idx);
-    if let Some(val) = app.input_history.get(next_idx) {
-        app.input = val.clone();
+    
+    let filter_shell = is_shell_prefix(&app.input);
+    let start = app.history_idx.map(|i| i.saturating_sub(1)).unwrap_or(app.input_history.len().saturating_sub(1));
+    
+    // Search backwards for a matching entry
+    for i in (0..=start).rev() {
+        if let Some(entry) = app.input_history.get(i) {
+            if !filter_shell || is_shell_command(entry) {
+                app.history_idx = Some(i);
+                app.input = entry.clone();
+                return;
+            }
+        }
     }
+    // No match found; keep current state
 }
 
 fn recall_history_next(app: &mut App) {
     if app.input_history.is_empty() {
         return;
     }
-    let next_idx = match app.history_idx {
+    
+    let filter_shell = is_shell_prefix(&app.input);
+    let start = match app.history_idx {
         None => return,
-        Some(i) if i + 1 >= app.input_history.len() => {
-            app.history_idx = None;
-            app.input.clear();
-            return;
-        }
         Some(i) => i + 1,
     };
-    app.history_idx = Some(next_idx);
-    if let Some(val) = app.input_history.get(next_idx) {
-        app.input = val.clone();
+    
+    // Search forwards for a matching entry
+    for i in start..app.input_history.len() {
+        if let Some(entry) = app.input_history.get(i) {
+            if !filter_shell || is_shell_command(entry) {
+                app.history_idx = Some(i);
+                app.input = entry.clone();
+                return;
+            }
+        }
     }
+    
+    // Reached end of history; clear input
+    app.history_idx = None;
+    app.input.clear();
 }
 
 fn handle_workflow_response(app: &mut App, workflow: WorkflowState, prompt: &str) {
@@ -717,6 +795,126 @@ enum WorkflowKind {
     CommitOnlyConfirm { suggested: String },
     StagePlan { args: Vec<String> },
     DiffPreview { file: Option<String> },
+}
+
+/// Handle shell commands prefixed with '$' or '!'.
+/// Returns true if the input was a shell command.
+fn maybe_handle_shell_command(app: &mut App, prompt: &str) -> bool {
+    let trimmed = prompt.trim();
+    
+    // Check for shell command prefix
+    let shell_cmd = if let Some(cmd) = trimmed.strip_prefix('$') {
+        cmd.trim()
+    } else if let Some(cmd) = trimmed.strip_prefix('!') {
+        cmd.trim()
+    } else {
+        return false;
+    };
+
+    if shell_cmd.is_empty() {
+        app.reply("Usage: $ <command> or ! <command>");
+        return true;
+    }
+
+    // Handle 'cd' builtin specially - it needs to change session state
+    if shell_cmd == "cd" || shell_cmd.starts_with("cd ") {
+        handle_cd(app, shell_cmd);
+        return true;
+    }
+
+    // Handle 'pwd' as a quick built-in
+    if shell_cmd == "pwd" {
+        app.reply(format!("{}", app.session.cwd.display()));
+        return true;
+    }
+
+    // Execute the command in the session's cwd
+    let cwd = app.session.cwd.clone();
+    match run_shell_command(&cwd, shell_cmd) {
+        Ok(output) => {
+            if output.trim().is_empty() {
+                app.reply("(command completed with no output)");
+            } else {
+                app.reply(output);
+            }
+        }
+        Err(err) => {
+            app.reply(format!("Error: {}", format_error(&err)));
+        }
+    }
+    true
+}
+
+fn handle_cd(app: &mut App, cmd: &str) {
+    let target = cmd.strip_prefix("cd").unwrap_or("").trim();
+    
+    let new_path = if target.is_empty() || target == "~" {
+        // cd with no args or ~ goes to home
+        dirs::home_dir().unwrap_or_else(|| app.session.cwd.clone())
+    } else if target == "-" {
+        // cd - not supported, just stay
+        app.reply("cd - not supported; use absolute path");
+        return;
+    } else if target.starts_with('/') {
+        // Absolute path
+        PathBuf::from(target)
+    } else if target.starts_with("~/") {
+        // Home-relative path
+        if let Some(home) = dirs::home_dir() {
+            home.join(&target[2..])
+        } else {
+            app.reply("Cannot resolve home directory");
+            return;
+        }
+    } else {
+        // Relative path
+        app.session.cwd.join(target)
+    };
+
+    // Canonicalize and check existence
+    match new_path.canonicalize() {
+        Ok(canonical) => {
+            if canonical.is_dir() {
+                app.session.set_cwd(canonical.clone());
+                app.reply(format!("cd {}", canonical.display()));
+            } else {
+                app.reply(format!("Not a directory: {}", new_path.display()));
+            }
+        }
+        Err(err) => {
+            app.reply(format!("cd: {}: {}", new_path.display(), err));
+        }
+    }
+}
+
+fn run_shell_command(cwd: &std::path::Path, cmd: &str) -> Result<String> {
+    let output = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(cmd)
+        .current_dir(cwd)
+        .output()
+        .context("spawning shell")?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    if !output.status.success() {
+        if !stderr.trim().is_empty() {
+            bail!("{}", stderr.trim());
+        } else {
+            bail!("command exited with {}", output.status);
+        }
+    }
+
+    // Combine stdout and stderr for complete output
+    let mut result = stdout.to_string();
+    if !stderr.trim().is_empty() {
+        if !result.is_empty() {
+            result.push('\n');
+        }
+        result.push_str(&stderr);
+    }
+    Ok(result.trim().to_string())
 }
 
 fn maybe_handle_intent(app: &mut App, prompt: &str) -> bool {
