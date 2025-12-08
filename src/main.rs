@@ -13,6 +13,7 @@ mod handlers;
 mod input;
 mod intent;
 mod ollama;
+mod repo;
 mod session;
 mod tools;
 mod ui;

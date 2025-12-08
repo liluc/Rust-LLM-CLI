@@ -8,6 +8,7 @@ use crate::{
     file_ops,
     intent::ParsedIntent,
     input::is_shell_command,
+    repo::{ProjectType, RepoInfo},
     session::Role,
     tools::ToolArgs,
     workflow::{generate_commit_message, generate_commit_message_async, WorkflowKind, WorkflowState},
@@ -25,6 +26,7 @@ pub trait IntentDispatcher {
     fn set_pending_workflow(&mut self, workflow: WorkflowState);
     fn get_session_cwd(&self) -> PathBuf;
     fn get_session_repo_root(&self) -> Option<PathBuf>;
+    fn get_session_repo_info(&self) -> Option<RepoInfo>;
     fn get_input_history(&self) -> &[String];
     fn get_config(&self) -> &Config;
     fn get_assistant_tx(&self) -> mpsc::UnboundedSender<AssistantEvent>;
@@ -90,6 +92,14 @@ pub fn dispatch_intent<D: IntentDispatcher>(
         }
         "write_file" => {
             handle_write_file_intent(dispatcher, &intent.args, original_input);
+            true
+        }
+        "build" => {
+            handle_build_intent(dispatcher);
+            true
+        }
+        "explain_project" => {
+            handle_explain_project_intent(dispatcher);
             true
         }
         "chat" => false, // Fall through to LLM chat
@@ -302,13 +312,16 @@ fn handle_find_todos_intent<D: IntentDispatcher>(dispatcher: &mut D) {
 }
 
 fn handle_run_tests_intent<D: IntentDispatcher>(dispatcher: &mut D) {
-    if let Some(repo_root) = dispatcher.get_session_repo_root() {
-        match run_command(&repo_root, "cargo", &["test"]) {
-            Ok(out) => dispatcher.reply(format!("cargo test output:\n{out}")),
-            Err(err) => dispatcher.reply(format!("cargo test failed: {}", format_error(&err))),
+    if let Some(repo_info) = dispatcher.get_session_repo_info() {
+        let (program, args) = repo_info.test_command();
+        let args_refs: Vec<&str> = args.iter().map(|s| s.as_ref()).collect();
+        
+        match run_command(&repo_info.root, program, &args_refs) {
+            Ok(out) => dispatcher.reply(format!("{} {} output:\n{}", program, args.join(" "), out)),
+            Err(err) => dispatcher.reply(format!("{} {} failed: {}", program, args.join(" "), format_error(&err))),
         }
     } else {
-        dispatcher.reply("Not in a cargo project; cannot run tests.");
+        dispatcher.reply("No project detected; cannot run tests.");
     }
 }
 
@@ -518,5 +531,53 @@ fn extract_path_from_list_command(input: &str) -> Option<String> {
         }
     }
     None
+}
+
+fn handle_build_intent<D: IntentDispatcher>(dispatcher: &mut D) {
+    if let Some(repo_info) = dispatcher.get_session_repo_info() {
+        let (program, args) = repo_info.build_command();
+        let args_refs: Vec<&str> = args.iter().map(|s| s.as_ref()).collect();
+        
+        match run_command(&repo_info.root, program, &args_refs) {
+            Ok(out) => dispatcher.reply(format!("{} {} output:\n{}", program, args.join(" "), out)),
+            Err(err) => dispatcher.reply(format!("{} {} failed: {}", program, args.join(" "), format_error(&err))),
+        }
+    } else {
+        dispatcher.reply("No project detected; cannot build.");
+    }
+}
+
+fn handle_explain_project_intent<D: IntentDispatcher>(dispatcher: &mut D) {
+    if let Some(repo_info) = dispatcher.get_session_repo_info() {
+        let type_str = match repo_info.project_type {
+            ProjectType::Rust => "Rust (Cargo)",
+            ProjectType::Node => "Node.js (npm)",
+            ProjectType::Python => "Python",
+            ProjectType::Go => "Go",
+            ProjectType::Unknown => "Unknown",
+        };
+        
+        let name_str = repo_info.name.as_deref().unwrap_or("(unnamed)");
+        let root_str = repo_info.root.display();
+        
+        let source_dirs: Vec<String> = repo_info.source_dirs
+            .iter()
+            .map(|p| p.display().to_string())
+            .collect();
+        
+        let mut output = vec![
+            format!("Project: {}", name_str),
+            format!("Type: {}", type_str),
+            format!("Root: {}", root_str),
+        ];
+        
+        if !source_dirs.is_empty() {
+            output.push(format!("Source dirs: {}", source_dirs.join(", ")));
+        }
+        
+        dispatcher.reply(output.join("\n"));
+    } else {
+        dispatcher.reply("No project detected in current directory.");
+    }
 }
 

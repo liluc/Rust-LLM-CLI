@@ -278,6 +278,10 @@ impl IntentDispatcher for App {
         self.session.repo_root.clone()
     }
 
+    fn get_session_repo_info(&self) -> Option<crate::repo::RepoInfo> {
+        self.session.repo_info.clone()
+    }
+
     fn get_input_history(&self) -> &[String] {
         &self.input_history
     }
@@ -452,6 +456,21 @@ fn submit_input(app: &mut App) {
     let prompt_for_task = prompt.clone();
     let embedding_cache = Arc::clone(&app.embedding_cache);
     let use_embeddings = app.embedding_cache.is_initialized();
+    
+    // Capture repo context before spawning
+    let repo_context = if let Some(info) = &app.session.repo_info {
+        let type_str = match info.project_type {
+            crate::repo::ProjectType::Rust => "Rust",
+            crate::repo::ProjectType::Node => "Node.js",
+            crate::repo::ProjectType::Python => "Python",
+            crate::repo::ProjectType::Go => "Go",
+            crate::repo::ProjectType::Unknown => "Unknown",
+        };
+        let name_str = info.name.as_deref().unwrap_or("unnamed");
+        format!("\n\nCurrent project: {} ({})", name_str, type_str)
+    } else {
+        String::new()
+    };
 
     // Insert placeholder for response
     let placeholder_idx = app.messages.len();
@@ -484,8 +503,8 @@ fn submit_input(app: &mut App) {
 
         // Fall through to regular LLM chat
         let composed_prompt = format!(
-            "{}\n\nUser: {}\nAssistant:",
-            system_prompt, prompt_for_task
+            "{}{}\n\nUser: {}\nAssistant:",
+            system_prompt, repo_context, prompt_for_task
         );
 
         let mut child = match TokioCommand::new("ollama")

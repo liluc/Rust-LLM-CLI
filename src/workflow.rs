@@ -26,6 +26,13 @@ pub enum WorkflowKind {
         content: String,
         overwrite: bool,
     },
+    #[allow(dead_code)]
+    ApplyDiff {
+        file: String,
+        original: String,
+        proposed: String,
+        description: String,
+    },
 }
 
 pub trait WorkflowResponder {
@@ -59,6 +66,14 @@ pub fn handle_workflow_response<R: WorkflowResponder>(
             overwrite,
         } => {
             handle_write_file_confirm(responder, &workflow.repo_root, prompt, path, content, overwrite);
+        }
+        WorkflowKind::ApplyDiff {
+            file,
+            original,
+            proposed,
+            description,
+        } => {
+            handle_apply_diff(responder, &workflow.repo_root, prompt, file, original, proposed, description);
         }
     }
 }
@@ -228,6 +243,42 @@ fn handle_write_file_confirm<R: WorkflowResponder>(
             responder.reply(format!("Failed to write file: {}", err));
         }
     }
+}
+
+fn handle_apply_diff<R: WorkflowResponder>(
+    responder: &mut R,
+    repo_root: &std::path::Path,
+    prompt: &str,
+    file: String,
+    _original: String,
+    proposed: String,
+    _description: String,
+) {
+    let lower = prompt.trim().to_lowercase();
+    
+    if matches!(lower.as_str(), "cancel" | "no" | "n") {
+        responder.reply("Diff application cancelled.");
+        return;
+    }
+    
+    if matches!(lower.as_str(), "yes" | "y") {
+        let target_path = PathBuf::from(&file);
+        match file_ops::write_file(&target_path, &proposed, repo_root) {
+            Ok(()) => {
+                responder.reply(format!("Applied changes to {}", file));
+            }
+            Err(err) => {
+                responder.reply(format!("Failed to apply changes: {}", err));
+            }
+        }
+        return;
+    }
+    
+    // For any other input, treat as "edit" - show the proposed content and ask again
+    responder.reply(format!(
+        "Edit mode not yet implemented. Type 'yes' to apply or 'no' to cancel.\n\nProposed content:\n{}",
+        &proposed[..proposed.len().min(500)]
+    ));
 }
 
 fn run_save_work_impl<R: WorkflowResponder>(
