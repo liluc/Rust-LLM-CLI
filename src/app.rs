@@ -227,7 +227,7 @@ impl App {
                     "💡 Generated command:\n  {}\n\n\
                      This will be saved as: \"{}\" → custom shell command\n\n\
                      Options:\n\
-                     • Type 'yes' to confirm and execute\n\
+                     • Press Enter (or type 'yes') to confirm and execute\n\
                      • Type 'edit: <new command>' to modify\n\
                      • Type 'no' to cancel",
                     generated_cmd,
@@ -423,17 +423,32 @@ fn handle_key_event(app: &mut App, key: crossterm::event::KeyEvent) {
 }
 
 fn submit_input(app: &mut App) {
-    if app.input.trim().is_empty() {
+    let raw_input = app.input.trim().to_string();
+    
+    // Allow empty input only if we have a pending workflow or feedback
+    if raw_input.is_empty() && app.pending_workflow.is_none() && app.pending_user_feedback.is_none() {
         return;
     }
 
-    let raw_input = app.input.trim().to_string();
     app.history_idx = None;
     app.input.clear();
 
     // Handle user feedback response if we're waiting for one
     if app.pending_user_feedback.is_some() {
         handle_user_feedback_response(app, &raw_input);
+        return;
+    }
+
+    // Handle pending workflow confirmations first (before recording to history)
+    if app.pending_workflow.is_some() {
+        // Record the confirmation response (or empty for Enter)
+        let display_input = if raw_input.is_empty() { 
+            "[Enter]".to_string() 
+        } else { 
+            raw_input.clone() 
+        };
+        app.push_recorded(Role::User, display_input);
+        handle_pending_workflow(app, &raw_input);
         return;
     }
 
@@ -469,46 +484,6 @@ fn submit_input(app: &mut App) {
         app.input_history.push(history_entry);
     }
 
-    // Handle pending workflow confirmations first
-    if let Some(workflow) = app.pending_workflow.take() {
-        // Need to handle special case for SaveWorkPlan
-        if matches!(workflow.kind, crate::workflow::WorkflowKind::SaveWorkPlan) {
-            let confirmed = matches!(prompt.trim().to_lowercase().as_str(), "y" | "yes");
-            if confirmed {
-                // Run git add -A first
-                match crate::commands::run_command(&workflow.repo_root, "git", &["add", "-A"]) {
-                    Ok(out) => {
-                        if !out.trim().is_empty() {
-                            app.reply(format!("git add -A output:\n{out}"));
-                        }
-                    }
-                    Err(err) => {
-                        app.reply(format!("git add -A failed: {}", crate::commands::format_error(&err)));
-                        return;
-                    }
-                }
-
-                // Generate commit message and move to next step
-                let suggested = generate_commit_message(&app.config, &workflow.repo_root)
-                    .unwrap_or_else(|| "chore: save work".to_string());
-                app.pending_workflow = Some(WorkflowState {
-                    kind: crate::workflow::WorkflowKind::SaveWorkCommit {
-                        suggested: suggested.clone(),
-                    },
-                    repo_root: workflow.repo_root.clone(),
-                });
-                app.reply(format!(
-                    "Suggested commit message:\n{}\nReply 'yes' to accept, or type a custom message. (Type 'cancel' to abort.)",
-                    suggested
-                ));
-            } else {
-                app.reply("Workflow cancelled.");
-            }
-        } else {
-            handle_workflow_response(app, workflow, &prompt);
-        }
-        return;
-    }
 
     // If in Shell mode, execute as shell command directly
     if app.input_mode == InputMode::Shell {
@@ -672,6 +647,47 @@ fn submit_input(app: &mut App) {
             }
         }
     });
+}
+
+fn handle_pending_workflow(app: &mut App, prompt: &str) {
+    if let Some(workflow) = app.pending_workflow.take() {
+        // Need to handle special case for SaveWorkPlan
+        if matches!(workflow.kind, crate::workflow::WorkflowKind::SaveWorkPlan) {
+            let confirmed = matches!(prompt.trim().to_lowercase().as_str(), "" | "y" | "yes");
+            if confirmed {
+                // Run git add -A first
+                match crate::commands::run_command(&workflow.repo_root, "git", &["add", "-A"]) {
+                    Ok(out) => {
+                        if !out.trim().is_empty() {
+                            app.reply(format!("git add -A output:\n{out}"));
+                        }
+                    }
+                    Err(err) => {
+                        app.reply(format!("git add -A failed: {}", crate::commands::format_error(&err)));
+                        return;
+                    }
+                }
+
+                // Generate commit message and move to next step
+                let suggested = generate_commit_message(&app.config, &workflow.repo_root)
+                    .unwrap_or_else(|| "chore: save work".to_string());
+                app.pending_workflow = Some(WorkflowState {
+                    kind: crate::workflow::WorkflowKind::SaveWorkCommit {
+                        suggested: suggested.clone(),
+                    },
+                    repo_root: workflow.repo_root.clone(),
+                });
+                app.reply(format!(
+                    "Suggested commit message:\n{}\nPress Enter (or type 'yes') to accept, or type a custom message. (Type 'cancel' to abort.)",
+                    suggested
+                ));
+            } else {
+                app.reply("Workflow cancelled.");
+            }
+        } else {
+            handle_workflow_response(app, workflow, prompt);
+        }
+    }
 }
 
 fn recall_history_prev(app: &mut App) {

@@ -97,7 +97,7 @@ fn handle_save_work_plan<R: WorkflowResponder>(
     repo_root: &std::path::Path,
     prompt: &str,
 ) {
-    let confirmed = matches!(prompt.trim().to_lowercase().as_str(), "y" | "yes");
+    let confirmed = matches!(prompt.trim().to_lowercase().as_str(), "" | "y" | "yes");
     if !confirmed {
         responder.reply("Workflow cancelled.");
         return;
@@ -130,7 +130,7 @@ fn handle_save_work_commit<R: WorkflowResponder>(
         responder.reply("Workflow cancelled.");
         return;
     }
-    let commit_msg = if matches!(lower.as_str(), "yes" | "y") {
+    let commit_msg = if matches!(lower.as_str(), "" | "yes" | "y") {
         suggested
     } else {
         prompt.trim().to_string()
@@ -144,7 +144,7 @@ fn handle_stage_plan<R: WorkflowResponder>(
     prompt: &str,
     args: Vec<String>,
 ) {
-    if matches!(prompt.trim().to_lowercase().as_str(), "yes" | "y") {
+    if matches!(prompt.trim().to_lowercase().as_str(), "" | "yes" | "y") {
         let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
         match run_command(repo_root, "git", &arg_refs) {
             Ok(out) => {
@@ -177,7 +177,7 @@ fn handle_diff_preview<R: WorkflowResponder>(
         responder.reply("Cancelled.");
         return;
     }
-    if input.eq_ignore_ascii_case("yes") || input.eq_ignore_ascii_case("y") {
+    if input.is_empty() || input.eq_ignore_ascii_case("yes") || input.eq_ignore_ascii_case("y") {
         responder.reply("Ok.");
         return;
     }
@@ -206,7 +206,7 @@ fn handle_commit_only_confirm<R: WorkflowResponder>(
         responder.reply("Commit cancelled.");
         return;
     }
-    let commit_msg = if matches!(lower.as_str(), "yes" | "y") {
+    let commit_msg = if matches!(lower.as_str(), "" | "yes" | "y") {
         suggested
     } else {
         prompt.trim().to_string()
@@ -242,7 +242,7 @@ fn handle_write_file_confirm<R: WorkflowResponder>(
     overwrite: bool,
 ) {
     let lower = prompt.trim().to_lowercase();
-    if !matches!(lower.as_str(), "yes" | "y") {
+    if !matches!(lower.as_str(), "" | "yes" | "y") {
         responder.reply("File write cancelled.");
         return;
     }
@@ -275,7 +275,7 @@ fn handle_apply_diff<R: WorkflowResponder>(
         return;
     }
     
-    if matches!(lower.as_str(), "yes" | "y") {
+    if matches!(lower.as_str(), "" | "yes" | "y") {
         let target_path = PathBuf::from(&file);
         match file_ops::write_file(&target_path, &proposed, repo_root) {
             Ok(()) => {
@@ -290,7 +290,7 @@ fn handle_apply_diff<R: WorkflowResponder>(
     
     // For any other input, treat as "edit" - show the proposed content and ask again
     responder.reply(format!(
-        "Edit mode not yet implemented. Type 'yes' to apply or 'no' to cancel.\n\nProposed content:\n{}",
+        "Edit mode not yet implemented. Press Enter (or type 'yes') to apply or 'no' to cancel.\n\nProposed content:\n{}",
         &proposed[..proposed.len().min(500)]
     ));
 }
@@ -478,7 +478,7 @@ fn handle_custom_command_confirm<R: WorkflowResponder>(
         return;
     }
     
-    if matches!(prompt_lower.as_str(), "y" | "yes") {
+    if matches!(prompt_lower.as_str(), "" | "y" | "yes") {
         let learned_global = save_path.parent().and_then(|p| p.parent()).map(|p| p.join("learned.toml"))
             .unwrap_or_else(|| save_path.clone());
         let learned_project = if save_path.to_string_lossy().contains(".llm_cli") {
@@ -509,6 +509,6 @@ fn handle_custom_command_confirm<R: WorkflowResponder>(
     } else if matches!(prompt_lower.as_str(), "n" | "no" | "cancel") {
         responder.reply("Custom command not saved.");
     } else {
-        responder.reply("Please type 'yes' to confirm, 'edit: <new command>' to modify, or 'no' to cancel.");
+        responder.reply("Please press Enter (or type 'yes') to confirm, 'edit: <new command>' to modify, or 'no' to cancel.");
     }
 }

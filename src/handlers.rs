@@ -245,7 +245,7 @@ fn handle_save_work_intent<D: IntentDispatcher>(dispatcher: &mut D) {
             "Status preview:",
             &status_preview,
             "",
-            "Type 'yes' to run, anything else to cancel.",
+            "Press Enter (or type 'yes') to run, anything else to cancel.",
         ]
         .join("\n");
         dispatcher.reply(plan);
@@ -275,7 +275,7 @@ fn handle_stage_intent<D: IntentDispatcher>(dispatcher: &mut D, args: &ToolArgs)
         repo_root,
     });
     dispatcher.reply(format!(
-        "Plan: git {}\nReply 'yes' to run, anything else to cancel.",
+        "Plan: git {}\nPress Enter (or type 'yes') to run, anything else to cancel.",
         display_args
     ));
 }
@@ -291,7 +291,7 @@ fn handle_commit_intent<D: IntentDispatcher>(dispatcher: &mut D) {
             repo_root,
         });
         dispatcher.reply(format!(
-            "Staged commit plan:\n- git commit with message:\n{}\n- (push not included)\nReply 'yes' to accept, or type a custom message. 'cancel' to abort.",
+            "Staged commit plan:\n- git commit with message:\n{}\n- (push not included)\nPress Enter (or type 'yes') to accept, or type a custom message. 'cancel' to abort.",
             suggested
         ));
     } else {
@@ -312,7 +312,7 @@ fn handle_status_intent<D: IntentDispatcher>(dispatcher: &mut D) {
         repo_root: root,
     });
     dispatcher.reply(format!(
-        "Status preview:\n{}\n\nDiff stat:\n{}\nReply with a file path to view its diff, 'yes' to continue, or anything else to cancel.",
+        "Status preview:\n{}\n\nDiff stat:\n{}\nReply with a file path to view its diff, press Enter (or type 'yes') to continue, or anything else to cancel.",
         status, diffstat
     ));
 }
@@ -511,7 +511,7 @@ fn handle_write_file_intent<D: IntentDispatcher>(
 
     let action = if overwrite { "overwrite" } else { "create" };
     let message = format!(
-        "Confirm {} file: {}\n\nContent preview:\n{}\n\nType 'yes' to proceed, or 'cancel' to abort.",
+        "Confirm {} file: {}\n\nContent preview:\n{}\n\nPress Enter (or type 'yes') to proceed, or 'cancel' to abort.",
         action,
         target_path.display(),
         preview
