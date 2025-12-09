@@ -4,9 +4,10 @@
 //! - Learned aliases (highest priority)
 //! - Exact tool names
 //! - Exact tool examples
-//! - Fuzzy matches against tool names
+//! - Fuzzy matches against tool names (using FZF algorithm)
 
-use strsim::jaro_winkler;
+use fuzzy_matcher::FuzzyMatcher;
+use fuzzy_matcher::skim::SkimMatcherV2;
 
 use crate::{
     intent::ParsedIntent,
@@ -14,7 +15,11 @@ use crate::{
     tools::TOOLS,
 };
 
-const FUZZY_THRESHOLD: f64 = 0.85;
+// Minimum score for FZF matching (scores are typically in range 0-200+)
+// Adjust this value based on testing - higher = stricter matching
+// Note: Good typo corrections like "staus" -> "status" score ~103
+//       Weak matches like "hello" in "shell command" score ~86
+const FUZZY_MIN_SCORE: i64 = 90;
 
 /// Try exact and fuzzy matching against tool names, examples, and learned aliases.
 /// Returns Some(intent) if a confident match is found, None otherwise.
@@ -42,45 +47,56 @@ pub fn fuzzy_match(input: &str, learned: &LearnedAliases) -> Option<ParsedIntent
         }
     }
     
-    // 4. Fuzzy match against tool names
-    let mut best_match: Option<(&str, f64)> = None;
+    // 4. Fuzzy match against tool names using FZF/Skim algorithm
+    let matcher = SkimMatcherV2::default();
+    let mut best_match: Option<(&str, i64)> = None;
     
     for tool in TOOLS {
-        let similarity = jaro_winkler(&input_lower, tool.name);
-        if similarity >= FUZZY_THRESHOLD {
-            match best_match {
-                Some((_, best_score)) if similarity > best_score => {
-                    best_match = Some((tool.name, similarity));
+        if let Some(score) = matcher.fuzzy_match(tool.name, &input_lower) {
+            if score >= FUZZY_MIN_SCORE {
+                match best_match {
+                    Some((_, best_score)) if score > best_score => {
+                        best_match = Some((tool.name, score));
+                    }
+                    None => {
+                        best_match = Some((tool.name, score));
+                    }
+                    _ => {}
                 }
-                None => {
-                    best_match = Some((tool.name, similarity));
-                }
-                _ => {}
             }
         }
     }
     
-    // 5. Fuzzy match against tool examples (lower confidence)
+    // 5. Fuzzy match against tool examples (if no tool name matched)
     if best_match.is_none() {
         for tool in TOOLS {
             for example in tool.examples {
-                let similarity = jaro_winkler(&input_lower, &example.to_lowercase());
-                if similarity >= FUZZY_THRESHOLD + 0.05 {
-                    match best_match {
-                        Some((_, best_score)) if similarity > best_score => {
-                            best_match = Some((tool.name, similarity * 0.9));
+                if let Some(score) = matcher.fuzzy_match(&example.to_lowercase(), &input_lower) {
+                    // Slightly lower confidence for example matches
+                    let adjusted_score = (score as f64 * 0.9) as i64;
+                    if adjusted_score >= FUZZY_MIN_SCORE {
+                        match best_match {
+                            Some((_, best_score)) if adjusted_score > best_score => {
+                                best_match = Some((tool.name, adjusted_score));
+                            }
+                            None => {
+                                best_match = Some((tool.name, adjusted_score));
+                            }
+                            _ => {}
                         }
-                        None => {
-                            best_match = Some((tool.name, similarity * 0.9));
-                        }
-                        _ => {}
                     }
                 }
             }
         }
     }
     
-    best_match.map(|(tool, score)| ParsedIntent::new(tool, score as f32))
+    // Convert score to normalized confidence (0.85-1.0 range)
+    best_match.map(|(tool, score)| {
+        // Normalize score to confidence. FZF scores are typically 0-200+
+        // We map scores to 0.85-1.0 range for consistency with other matchers
+        let confidence = ((score.min(200) as f32 / 200.0) * 0.15 + 0.85).min(1.0);
+        ParsedIntent::new(tool, confidence)
+    })
 }
 
 #[cfg(test)]
@@ -98,7 +114,8 @@ mod tests {
     #[test]
     fn test_exact_example() {
         let learned = LearnedAliases::default();
-        let intent = fuzzy_match("save work", &learned).unwrap();
+        // Test with an actual example from the save_work tool
+        let intent = fuzzy_match("push my changes", &learned).unwrap();
         assert_eq!(intent.tool, "save_work");
         assert_eq!(intent.confidence, 0.95);
     }
@@ -106,9 +123,19 @@ mod tests {
     #[test]
     fn test_fuzzy_match() {
         let learned = LearnedAliases::default();
-        let intent = fuzzy_match("stauts", &learned).unwrap();
+        // FZF requires characters in sequential order, so "staus" (s-t-a-u-s matches s-t-a-t-u-s)
+        let intent = fuzzy_match("staus", &learned).unwrap();
         assert_eq!(intent.tool, "status");
         assert!(intent.confidence >= 0.85);
+    }
+
+    #[test]
+    fn test_fuzzy_no_false_positive() {
+        let learned = LearnedAliases::default();
+        // "hello" should NOT match "shell" - this was the original bug
+        // With FZF matcher and threshold of 90, weak matches are rejected
+        let intent = fuzzy_match("hello", &learned);
+        assert!(intent.is_none(), "hello should not match shell or any other tool");
     }
 
     #[test]

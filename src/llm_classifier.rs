@@ -19,17 +19,25 @@ pub async fn classify_with_llm(input: &str, model: &str) -> Result<Option<Parsed
     
     let prompt = format!(
         "You are a command classifier. The user is either:\n\
-         1. Trying to perform an ACTION (use one of the tools)\n\
-         2. Just CHATTING / asking a question (respond with 'chat')\n\
+         1. Trying to perform an ACTION with the codebase/git (use one of the tools)\n\
+         2. Just CHATTING or asking questions about concepts (respond with 'chat')\n\
          \n\
          Available tools: {}\n\
+         \n\
+         Rules:\n\
+         - If asking about concepts/explanations/how things work → 'chat'\n\
+         - If asking to DO something (run, execute, show, save, commit) → tool name\n\
+         - When in doubt, prefer 'chat'\n\
          \n\
          Examples:\n\
          Input: \"hello\" → chat\n\
          Input: \"how are you?\" → chat\n\
          Input: \"what is rust?\" → chat\n\
-         Input: \"show me the status\" → status\n\
+         Input: \"explain how this works\" → chat\n\
+         Input: \"can you explain the code?\" → chat\n\
+         Input: \"show me the git status\" → status\n\
          Input: \"save my work\" → save_work\n\
+         Input: \"run the tests\" → run_tests\n\
          \n\
          Respond with ONLY the tool name or 'chat', nothing else.\n\
          \n\
