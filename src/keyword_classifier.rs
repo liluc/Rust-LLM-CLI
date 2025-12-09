@@ -57,9 +57,18 @@ impl KeywordClassifier {
         // Find best match
         scores.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         
+        // Debug: Show top 3 scores
+        eprintln!("[Keyword Classifier] Input: '{}'", input);
+        for (i, (tool, score)) in scores.iter().take(3).enumerate() {
+            eprintln!("  {}. {} (score: {:.3})", i + 1, tool, score);
+        }
+        
         if let Some((tool, score)) = scores.first() {
             if *score >= CONFIDENCE_THRESHOLD {
+                eprintln!("[Keyword Classifier] ✓ Matched '{}' with confidence {:.3} (threshold: {})", tool, score, CONFIDENCE_THRESHOLD);
                 return Ok(Some(ParsedIntent::new(tool, *score)));
+            } else {
+                eprintln!("[Keyword Classifier] ✗ Best score {:.3} below threshold {}", score, CONFIDENCE_THRESHOLD);
             }
         }
         

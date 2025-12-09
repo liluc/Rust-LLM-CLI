@@ -3,7 +3,7 @@
 //! Uses a small, fast local LLM (like qwen2:0.5b) to classify intent when
 //! deterministic methods fail. This provides flexibility for novel phrasing.
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 
 use crate::{intent::ParsedIntent, tools::TOOLS};
 
@@ -13,6 +13,8 @@ const LLM_CONFIDENCE_THRESHOLD: f32 = 0.5;
 /// Returns Some(intent) if LLM provides a valid tool match, None otherwise.
 /// Returns "chat" intent if user is just having a conversation.
 pub async fn classify_with_llm(input: &str, model: &str) -> Result<Option<ParsedIntent>> {
+    eprintln!("[LLM Classifier] Starting classification for input: '{}' with model: '{}'", input, model);
+    
     // Build tool list for prompt
     let tool_names: Vec<_> = TOOLS.iter().map(|t| t.name).collect();
     let tools_str = tool_names.join(", ");
@@ -47,8 +49,9 @@ pub async fn classify_with_llm(input: &str, model: &str) -> Result<Option<Parsed
     );
     
     // Call Ollama
+    eprintln!("[LLM Classifier] Calling Ollama API at http://localhost:11434/api/generate");
     let client = reqwest::Client::new();
-    let response = client
+    let response = match client
         .post("http://localhost:11434/api/generate")
         .json(&serde_json::json!({
             "model": model,
@@ -61,27 +64,56 @@ pub async fn classify_with_llm(input: &str, model: &str) -> Result<Option<Parsed
         }))
         .send()
         .await
-        .context("calling Ollama API for LLM classification")?;
+    {
+        Ok(resp) => resp,
+        Err(e) => {
+            eprintln!("[LLM Classifier] ✗ ERROR: Failed to call Ollama API: {}", e);
+            eprintln!("[LLM Classifier] ✗ Is Ollama running? Try: curl http://localhost:11434/api/version");
+            return Ok(None);
+        }
+    };
     
-    if !response.status().is_success() {
+    let status = response.status();
+    if !status.is_success() {
+        let error_text = response.text().await.unwrap_or_else(|_| "unknown error".to_string());
+        eprintln!("[LLM Classifier] ✗ ERROR: Ollama returned status {}: {}", status, error_text);
+        eprintln!("[LLM Classifier] ✗ Model '{}' may not be installed. Try: ollama pull {}", model, model);
         return Ok(None);
     }
     
-    let result: serde_json::Value = response.json().await.context("parsing LLM response")?;
+    eprintln!("[LLM Classifier] ✓ Got successful response from Ollama");
+    
+    let result: serde_json::Value = match response.json().await {
+        Ok(json) => json,
+        Err(e) => {
+            eprintln!("[LLM Classifier] ✗ ERROR: Failed to parse JSON response: {}", e);
+            return Ok(None);
+        }
+    };
+    
     let llm_response = result["response"]
         .as_str()
-        .unwrap_or("")
-        .trim()
-        .to_lowercase();
+        .unwrap_or("");
+    
+    if llm_response.is_empty() {
+        eprintln!("[LLM Classifier] ✗ ERROR: Got empty response from Ollama");
+        eprintln!("[LLM Classifier] ✗ Full JSON: {}", result);
+        return Ok(None);
+    }
+    
+    let llm_response = llm_response.trim().to_lowercase();
+    eprintln!("[LLM Classifier] ✓ Raw LLM response: '{}'", llm_response);
     
     // Check for "chat" response
     if llm_response == "chat" || llm_response.contains("chat") {
+        eprintln!("[LLM Classifier] ✓ Classified as CHAT");
         return Ok(Some(ParsedIntent::new("chat", LLM_CONFIDENCE_THRESHOLD)));
     }
     
     // Check if response matches a valid tool
     for tool in TOOLS {
         if llm_response == tool.name || llm_response.contains(tool.name) {
+            eprintln!("[LLM Classifier] ✓ Classified as TOOL: {}", tool.name);
             return Ok(Some(ParsedIntent::new(tool.name, LLM_CONFIDENCE_THRESHOLD)));
         }
     }
@@ -89,11 +121,13 @@ pub async fn classify_with_llm(input: &str, model: &str) -> Result<Option<Parsed
     // Also check if tool name is contained in response (handles "the tool is: status")
     for tool in TOOLS {
         if tool.name.contains(&llm_response) && llm_response.len() > 3 {
+            eprintln!("[LLM Classifier] ✓ Classified as TOOL (fuzzy): {}", tool.name);
             return Ok(Some(ParsedIntent::new(tool.name, LLM_CONFIDENCE_THRESHOLD * 0.9)));
         }
     }
     
     // If LLM couldn't classify, return None (will fall through to ask_user)
+    eprintln!("[LLM Classifier] ✗ Could not match response '{}' to any tool or 'chat'", llm_response);
     Ok(None)
 }
 
