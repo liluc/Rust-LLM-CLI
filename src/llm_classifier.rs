@@ -11,16 +11,30 @@ const LLM_CONFIDENCE_THRESHOLD: f32 = 0.5;
 
 /// Use a small LLM to classify intent when other methods fail.
 /// Returns Some(intent) if LLM provides a valid tool match, None otherwise.
+/// Returns "chat" intent if user is just having a conversation.
 pub async fn classify_with_llm(input: &str, model: &str) -> Result<Option<ParsedIntent>> {
     // Build tool list for prompt
     let tool_names: Vec<_> = TOOLS.iter().map(|t| t.name).collect();
     let tools_str = tool_names.join(", ");
     
     let prompt = format!(
-        "You are a command classifier. Respond with ONLY the tool name, nothing else.\n\
-         Available tools: {}\n\n\
+        "You are a command classifier. The user is either:\n\
+         1. Trying to perform an ACTION (use one of the tools)\n\
+         2. Just CHATTING / asking a question (respond with 'chat')\n\
+         \n\
+         Available tools: {}\n\
+         \n\
+         Examples:\n\
+         Input: \"hello\" → chat\n\
+         Input: \"how are you?\" → chat\n\
+         Input: \"what is rust?\" → chat\n\
+         Input: \"show me the status\" → status\n\
+         Input: \"save my work\" → save_work\n\
+         \n\
+         Respond with ONLY the tool name or 'chat', nothing else.\n\
+         \n\
          User input: \"{}\"\n\
-         Tool name:",
+         Response:",
         tools_str, input
     );
     
@@ -52,6 +66,11 @@ pub async fn classify_with_llm(input: &str, model: &str) -> Result<Option<Parsed
         .trim()
         .to_lowercase();
     
+    // Check for "chat" response
+    if llm_response == "chat" || llm_response.contains("chat") {
+        return Ok(Some(ParsedIntent::new("chat", LLM_CONFIDENCE_THRESHOLD)));
+    }
+    
     // Check if response matches a valid tool
     for tool in TOOLS {
         if llm_response == tool.name || llm_response.contains(tool.name) {
@@ -66,6 +85,7 @@ pub async fn classify_with_llm(input: &str, model: &str) -> Result<Option<Parsed
         }
     }
     
+    // If LLM couldn't classify, return None (will fall through to ask_user)
     Ok(None)
 }
 

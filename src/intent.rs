@@ -55,12 +55,21 @@ pub async fn resolve_intent(
     }
     
     // Tier 3: Small LLM classifier (~500ms)
+    // This can return "chat" if user is just chatting, or a tool name if they're trying to do something
     if let Some(mut intent) = llm_classifier::classify_with_llm(input, llm_model).await? {
         intent.args = extract_args_from_input(input, &intent.tool);
+        
+        // If LLM classified as "chat", return it directly
+        if intent.tool == "chat" {
+            return Ok(intent);
+        }
+        
+        // If LLM found a tool match, return it
         return Ok(intent);
     }
     
-    // Tier 4: Ask user (return special intent)
+    // Tier 4: Ask user (only when LLM couldn't classify at all)
+    // This means the input looks like an action intent but we can't figure out which tool
     Ok(ParsedIntent {
         tool: "ask_user".to_string(),
         args: ToolArgs {
