@@ -36,15 +36,15 @@ pub async fn run(config: Config) -> Result<()> {
 
     // Initialize embedding cache for semantic intent matching
     let mut embedding_cache = EmbeddingCache::new(Some(&config.embedding_model));
-    eprintln!("Initializing embedding cache (this may take a moment)...");
+    tracing::info!("Initializing embedding cache (this may take a moment)...");
     if let Err(e) = embedding_cache.initialize(Some(&config.embedding_cache_path)).await {
-        eprintln!(
+        tracing::warn!(
             "Warning: Could not initialize embeddings: {}. Falling back to direct chat.",
             e
         );
-        eprintln!("Tip: Run 'ollama pull {}' to enable semantic matching.", config.embedding_model);
+        tracing::info!("Tip: Run 'ollama pull {}' to enable semantic matching.", config.embedding_model);
     } else {
-        eprintln!("Embedding cache ready!");
+        tracing::info!("Embedding cache ready!");
     }
     let embedding_cache = Arc::new(embedding_cache);
 
@@ -509,7 +509,7 @@ fn submit_input(app: &mut App) {
     
     // Load learned aliases
     let learned_global = app.config.learned_path.clone();
-    let learned_project = app.session.repo_root.as_ref().map(|r| r.join(".llm_cli/learned.toml"));
+    let learned_project = app.session.repo_root.as_ref().map(|r| r.join(".llm-cli/learned.toml"));
     
     // Capture repo context before spawning
     let repo_context = if let Some(info) = &app.session.repo_info {
@@ -716,16 +716,12 @@ fn recall_history_next(app: &mut App) {
 fn handle_user_feedback_response(app: &mut App, response: &str) {
     let original_input = app.pending_user_feedback.take().unwrap();
     
-    // Determine save path (prefer project-local if in a repo)
-    let save_path = if let Some(repo_root) = &app.session.repo_root {
-        repo_root.join(".llm_cli/learned.toml")
-    } else {
-        app.config.learned_path.clone()
-    };
+    // Determine save path (always use .llm-cli in current directory)
+    let save_path = PathBuf::from(".llm-cli/learned.toml");
     
     // Load current learned aliases
     let learned_global = app.config.learned_path.clone();
-    let learned_project = app.session.repo_root.as_ref().map(|r| r.join(".llm_cli/learned.toml"));
+    let learned_project = app.session.repo_root.as_ref().map(|r| r.join(".llm-cli/learned.toml"));
     let mut learned = LearnedAliases::load(&learned_global, learned_project.as_deref())
         .unwrap_or_default();
     

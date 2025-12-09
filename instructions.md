@@ -23,17 +23,20 @@ bash scripts/health.sh llama3
 - Timeouts: LLM 45s; command 60s; request 60s.
 - Max context: 4096 tokens.
 - Streaming responses: on by default.
-- History file: `~/.local/state/llm-cli/history.jsonl` (or `~/Library/Application Support/llm-cli/history.jsonl` on macOS).
+- All data stored in project's `.llm-cli/` directory (history, learned commands, embeddings, config).
 - Generate commit message: on by default.
 - Embedding model: `nomic-embed-text` (optional, for semantic intent matching).
+- Classifier model: `qwen2:1.5b` (for intent classification fallback).
 
 ## Setup and Usage
 - Prereqs: Rust toolchain (rustup/cargo), Ollama 0.13+ running (`ollama serve`).
 - Pull the default model: `ollama pull "llama3"` (or `llama3:8b`).
 - (Optional) Pull embedding model: `ollama pull "nomic-embed-text"` for semantic intent matching.
+- (Optional) Pull classifier model: `ollama pull "qwen2:1.5b"` for intent classification.
 - Health check: `cargo run -- health --model llama3` (or use `bash scripts/health.sh llama3`).
 - Run the TUI: `cargo run -- run` or simply `cargo run`.
-- Config file: place `config.toml` at `~/.config/llm-cli/config.toml` (Linux) or `~/Library/Application Support/llm-cli/config.toml` (macOS), or pass `--config path`. See `config.example.toml` for keys.
+- Config file: Create `.llm-cli/config.toml` in your project directory, or pass `--config path`. See `config.example.toml` for available options.
+- All files (history, learned commands, embeddings) are stored in `.llm-cli/` directory in your project.
 - Env overrides: `LLM_CLI_MODEL`, `LLM_CLI_SYSTEM_PROMPT`, `LLM_CLI_LLM_TIMEOUT_SECS`, `LLM_CLI_CMD_TIMEOUT_SECS`, `LLM_CLI_MAX_CONTEXT_TOKENS`, `LLM_CLI_STREAMING`, `LLM_CLI_HISTORY_PATH`, `LLM_CLI_REQUEST_TIMEOUT_SECS`, `LLM_CLI_GENERATE_COMMIT_MESSAGE`.
 
 ## Notes
