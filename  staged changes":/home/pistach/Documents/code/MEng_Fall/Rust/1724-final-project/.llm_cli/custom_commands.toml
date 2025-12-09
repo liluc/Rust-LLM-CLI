@@ -1,0 +1,5 @@
+[[custom_commands]]
+phrase = "save to local"
+command = 'git add -A && git diff --cached --stat && git commit -m "chore'
+timestamp = "1765238547"
+source = "user_custom_generated"

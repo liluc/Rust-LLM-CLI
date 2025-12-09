@@ -4,6 +4,7 @@ use crate::{
     commands::{format_error, run_command, split_commit_message},
     config::Config,
     file_ops,
+    learned::LearnedAliases,
 };
 
 use tokio::process::Command as TokioCommand;
@@ -26,6 +27,11 @@ pub enum WorkflowKind {
         content: String,
         overwrite: bool,
     },
+    CustomCommandConfirm {
+        original_input: String,
+        generated_cmd: String,
+        save_path: PathBuf,
+    },
     #[allow(dead_code)]
     ApplyDiff {
         file: String,
@@ -37,6 +43,7 @@ pub enum WorkflowKind {
 
 pub trait WorkflowResponder {
     fn reply(&mut self, content: impl Into<String>);
+    fn execute_shell_command(&mut self, cmd: &str);
 }
 
 pub fn handle_workflow_response<R: WorkflowResponder>(
@@ -66,6 +73,13 @@ pub fn handle_workflow_response<R: WorkflowResponder>(
             overwrite,
         } => {
             handle_write_file_confirm(responder, &workflow.repo_root, prompt, path, content, overwrite);
+        }
+        WorkflowKind::CustomCommandConfirm {
+            original_input,
+            generated_cmd,
+            save_path,
+        } => {
+            handle_custom_command_confirm(responder, prompt, original_input, generated_cmd, save_path);
         }
         WorkflowKind::ApplyDiff {
             file,
@@ -417,3 +431,84 @@ pub async fn generate_commit_message_async(
     }
 }
 
+
+fn handle_custom_command_confirm<R: WorkflowResponder>(
+    responder: &mut R,
+    prompt: &str,
+    original_input: String,
+    generated_cmd: String,
+    save_path: PathBuf,
+) {
+    let prompt_lower = prompt.trim().to_lowercase();
+    
+    // Check for edit command
+    if let Some(new_cmd) = prompt.trim().strip_prefix("edit:").or_else(|| prompt.trim().strip_prefix("edit ")) {
+        let edited_cmd = new_cmd.trim();
+        if !edited_cmd.is_empty() {
+            let learned_global = save_path.parent().and_then(|p| p.parent()).map(|p| p.join("learned.toml"))
+                .unwrap_or_else(|| save_path.clone());
+            let learned_project = if save_path.to_string_lossy().contains(".llm_cli") {
+                Some(save_path.as_path())
+            } else {
+                None
+            };
+            
+            let mut learned = LearnedAliases::load(&learned_global, learned_project).unwrap_or_default();
+            
+            if let Err(e) = learned.save_custom_command(
+                &original_input,
+                edited_cmd,
+                &save_path,
+                "user_custom_edited",
+            ) {
+                responder.reply(format!("Failed to save custom command: {}", e));
+            } else {
+                responder.reply(format!(
+                    "✓ Learned custom command: \"{}\" → {}\nExecuting now...",
+                    original_input,
+                    edited_cmd
+                ));
+                
+                // Use execute_shell_command to properly expand handlers like {{GEN_COMMIT_MSG}}
+                responder.execute_shell_command(edited_cmd);
+            }
+        } else {
+            responder.reply("Empty command. Custom command not saved.");
+        }
+        return;
+    }
+    
+    if matches!(prompt_lower.as_str(), "y" | "yes") {
+        let learned_global = save_path.parent().and_then(|p| p.parent()).map(|p| p.join("learned.toml"))
+            .unwrap_or_else(|| save_path.clone());
+        let learned_project = if save_path.to_string_lossy().contains(".llm_cli") {
+            Some(save_path.as_path())
+        } else {
+            None
+        };
+        
+        let mut learned = LearnedAliases::load(&learned_global, learned_project).unwrap_or_default();
+        
+        if let Err(e) = learned.save_custom_command(
+            &original_input,
+            &generated_cmd,
+            &save_path,
+            "user_custom_generated",
+        ) {
+            responder.reply(format!("Failed to save custom command: {}", e));
+        } else {
+            responder.reply(format!(
+                "✓ Learned custom command: \"{}\" → {}\nExecuting now...",
+                original_input,
+                generated_cmd
+            ));
+            
+            // Use execute_shell_command to properly expand handlers like {{GEN_COMMIT_MSG}}
+            responder.execute_shell_command(&generated_cmd);
+        }
+    } else if matches!(prompt_lower.as_str(), "n" | "no" | "cancel") {
+        responder.reply("Custom command not saved.");
+    } else {
+        responder.reply("Please type 'yes' to confirm, 'edit: <new command>' to modify, or 'no' to cancel.");
+    }
+}

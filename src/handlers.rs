@@ -5,6 +5,7 @@ use tokio::sync::mpsc;
 use crate::{
     commands::{format_error, run_command, run_shell_command},
     config::Config,
+    custom_command_generator::expand_command_handlers,
     file_ops,
     intent::ParsedIntent,
     input::is_shell_command,
@@ -125,9 +126,30 @@ pub fn handle_shell_dispatch<D: IntentDispatcher>(dispatcher: &mut D, cmd: &str)
         return;
     }
 
+    // Expand composable handlers (like {{GEN_COMMIT_MSG}}) if present
+    let expanded_cmd = if cmd.contains("{{") && cmd.contains("}}") {
+        let repo_root = dispatcher.get_session_repo_root()
+            .unwrap_or_else(|| dispatcher.get_session_cwd());
+        match expand_command_handlers(cmd, dispatcher.get_config(), &repo_root) {
+            Ok(expanded) => {
+                // Show the expanded command to the user
+                if expanded != cmd {
+                    dispatcher.reply(format!("📝 Expanded command:\n  {}", expanded));
+                }
+                expanded
+            }
+            Err(e) => {
+                dispatcher.reply(format!("Failed to expand command handlers: {}", e));
+                return;
+            }
+        }
+    } else {
+        cmd.to_string()
+    };
+
     // Execute the command in the session's cwd
     let cwd = dispatcher.get_session_cwd();
-    match run_shell_command(&cwd, cmd) {
+    match run_shell_command(&cwd, &expanded_cmd) {
         Ok(output) => {
             if output.trim().is_empty() {
                 dispatcher.reply("(command completed with no output)");
