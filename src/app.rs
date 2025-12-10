@@ -10,7 +10,7 @@ use tokio::{
 };
 
 use anyhow::{Context, Result};
-use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
+use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers, MouseEvent, MouseEventKind};
 
 use std::sync::Arc;
 
@@ -67,10 +67,16 @@ pub async fn run(config: Config) -> Result<()> {
             .unwrap_or(Duration::from_millis(0));
 
         if event::poll(timeout)? {
-            if let Event::Key(key) = event::read()? {
-                if key.kind == KeyEventKind::Press {
-                    handle_key_event(&mut app, key);
+            match event::read()? {
+                Event::Key(key) => {
+                    if key.kind == KeyEventKind::Press {
+                        handle_key_event(&mut app, key);
+                    }
                 }
+                Event::Mouse(mouse) => {
+                    handle_mouse_event(&mut app, mouse);
+                }
+                _ => {}
             }
         }
 
@@ -104,6 +110,7 @@ struct App {
     embedding_cache: Arc<EmbeddingCache>,
     input_mode: InputMode,
     should_quit: bool,
+    viewing_history: bool,
 }
 
 impl App {
@@ -126,6 +133,7 @@ impl App {
             embedding_cache,
             input_mode: InputMode::Chat,
             should_quit: false,
+            viewing_history: false,
         };
 
         let status = if embeddings_ready {
@@ -134,7 +142,7 @@ impl App {
             "embeddings: disabled"
         };
         let system_msg = format!(
-            "LLM CLI ready. Model: {} ({}). Modes: Chat/Shell (Ctrl+S). History: ↑/↓. Enter to submit; Esc/q to exit.",
+            "LLM CLI ready. Model: {} ({}). Modes: Chat/Shell (Ctrl+S). History: ↑/↓. Scroll: mouse/PgUp/PgDn. Enter to submit; Esc/q to exit.",
             app.config.model, status
         );
         app.push_recorded(Role::System, system_msg);
@@ -143,7 +151,11 @@ impl App {
 
     fn create_view(&self) -> AppView<'_> {
         AppView {
-            messages: &self.messages,
+            messages: if self.viewing_history {
+                &self.session.history
+            } else {
+                &self.messages
+            },
             scroll: self.scroll,
             input: &self.input,
             input_mode: self.input_mode,
@@ -168,6 +180,7 @@ impl App {
                 AssistantEvent::Failed { idx, error } => self.fail_assistant(idx, error),
             }
             self.scroll = 0;
+            self.viewing_history = false;
         }
     }
 
@@ -180,6 +193,7 @@ impl App {
         });
         self.session.record(Message { role, content });
         self.scroll = 0;
+        self.viewing_history = false;
         idx
     }
 
@@ -194,6 +208,7 @@ impl App {
             content,
         });
         self.scroll = 0;
+        self.viewing_history = false;
     }
 
     fn append_assistant_chunk(&mut self, idx: usize, chunk: String) {
@@ -530,16 +545,28 @@ fn handle_key_event(app: &mut App, key: crossterm::event::KeyEvent) {
             recall_history_next(app);
         }
         KeyCode::PageUp => {
-            app.scroll = app.scroll.saturating_add(10);
+            scroll_session_history_up(app);
         }
         KeyCode::PageDown => {
-            app.scroll = app.scroll.saturating_sub(10);
+            scroll_session_history_down(app);
         }
         KeyCode::Backspace => {
             app.input.pop();
         }
         KeyCode::Char(ch) => {
             app.input.push(ch);
+        }
+        _ => {}
+    }
+}
+
+fn handle_mouse_event(app: &mut App, mouse: MouseEvent) {
+    match mouse.kind {
+        MouseEventKind::ScrollUp => {
+            scroll_session_history_up(app);
+        }
+        MouseEventKind::ScrollDown => {
+            scroll_session_history_down(app);
         }
         _ => {}
     }
@@ -846,6 +873,25 @@ fn recall_history_next(app: &mut App) {
             app.history_idx = None;
             app.input.clear();
         }
+    }
+}
+
+fn scroll_session_history_up(app: &mut App) {
+    // Enable history viewing mode
+    app.viewing_history = true;
+    // Scroll up (increase scroll offset from bottom)
+    app.scroll = app.scroll.saturating_add(3);
+}
+
+fn scroll_session_history_down(app: &mut App) {
+    // Scroll down (decrease scroll offset from bottom)
+    if app.scroll > 0 {
+        app.scroll = app.scroll.saturating_sub(3);
+    }
+    
+    // If we've scrolled all the way to the bottom, return to live view
+    if app.scroll == 0 {
+        app.viewing_history = false;
     }
 }
 
