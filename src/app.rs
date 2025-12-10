@@ -16,6 +16,7 @@ use std::sync::Arc;
 
 use crate::{
     config::Config,
+    context,
     custom_command_generator,
     embedding::EmbeddingCache,
     handlers::{dispatch_intent, AssistantEvent, IntentDispatcher},
@@ -226,6 +227,25 @@ impl App {
             .unwrap_or_default();
         let final_content = content.unwrap_or(fallback);
 
+        // Check for commit message generation signal
+        if final_content.starts_with("__COMMIT_MSG__:") {
+            if let Some(msg_end) = final_content.find('\n') {
+                let msg = &final_content[14..msg_end]; // Skip "__COMMIT_MSG__:"
+                self.session.record_output("commit_msg", "Generated commit message", msg);
+            }
+            // Remove the signal prefix and continue with normal display
+            let display_content = final_content.split_once('\n')
+                .map(|(_, rest)| rest)
+                .unwrap_or(&final_content);
+            self.upsert_message(idx, Role::Assistant, display_content.to_string());
+            self.session.record(Message {
+                role: Role::Assistant,
+                content: display_content.to_string(),
+            });
+            self.pending_idxs.retain(|&i| i != idx);
+            return;
+        }
+        
         // Check for custom command generation signal
         if final_content.starts_with("__CUSTOM_COMMAND_GENERATED__:") {
             self.pending_idxs.retain(|&i| i != idx);
@@ -510,6 +530,10 @@ impl IntentDispatcher for App {
     fn set_session_cwd(&mut self, new_cwd: PathBuf) {
         self.session.set_cwd(new_cwd);
     }
+
+    fn record_output(&mut self, kind: &'static str, summary: &str, content: &str) {
+        self.session.record_output(kind, summary, content);
+    }
 }
 
 // Implement WorkflowResponder for App
@@ -675,6 +699,13 @@ fn submit_input(app: &mut App) {
     } else {
         String::new()
     };
+    
+    // Inject recent context if user input contains references
+    let context_injection = if context::contains_reference(&prompt_for_task) {
+        context::format_context_for_prompt(&app.session.recent_outputs)
+    } else {
+        String::new()
+    };
 
     // Insert placeholder for response
     let placeholder_idx = app.messages.len();
@@ -719,8 +750,8 @@ fn submit_input(app: &mut App) {
 
         // Fall through to regular LLM chat
         let composed_prompt = format!(
-            "{}{}\n\nUser: {}\nAssistant:",
-            system_prompt, repo_context, prompt_for_task
+            "{}{}{}\n\nUser: {}\nAssistant:",
+            system_prompt, repo_context, context_injection, prompt_for_task
         );
 
         let mut child = match TokioCommand::new("ollama")
