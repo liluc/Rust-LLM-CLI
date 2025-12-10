@@ -6,7 +6,7 @@ use std::path::Path;
 use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
 
-use crate::{learned::LearnedAliases, tools::TOOLS};
+use crate::{file_access::FileAccessTracker, learned::LearnedAliases, tools::TOOLS};
 
 pub struct CompletionProvider {
     tool_examples: Vec<String>,
@@ -37,6 +37,7 @@ impl CompletionProvider {
         cwd: &Path,
         history: &[String],
         learned: &LearnedAliases,
+        file_tracker: &FileAccessTracker,
     ) -> Option<String> {
         if input.is_empty() {
             return None;
@@ -47,7 +48,7 @@ impl CompletionProvider {
         
         // Check if last word is path-like
         if is_path_like(last_word, cwd) {
-            if let Some(path_completion) = complete_path(last_word, cwd) {
+            if let Some(path_completion) = complete_path(last_word, cwd, file_tracker) {
                 // Return only the suffix beyond the last word
                 if path_completion.len() > last_word.len() {
                     return Some(path_completion[last_word.len()..].to_string());
@@ -137,7 +138,8 @@ fn is_path_like(word: &str, cwd: &Path) -> bool {
 }
 
 /// Complete a path by listing matching files/folders.
-fn complete_path(partial: &str, cwd: &Path) -> Option<String> {
+/// Uses frecency scoring to prioritize frequently/recently accessed files.
+fn complete_path(partial: &str, cwd: &Path, file_tracker: &FileAccessTracker) -> Option<String> {
     // Handle relative paths
     let path_str = if partial.starts_with('~') {
         // Expand home directory
@@ -187,26 +189,42 @@ fn complete_path(partial: &str, cwd: &Path) -> Option<String> {
         return None;
     }
     
-    // Find first matching entry
-    if let Ok(entries) = std::fs::read_dir(search_dir) {
+    // Collect matching entries and sort by frecency score
+    if let Ok(entries) = std::fs::read_dir(&search_dir) {
+        let mut candidates = Vec::new();
+        
         for entry in entries.flatten() {
             if let Some(name) = entry.file_name().to_str() {
                 if name.starts_with(prefix) {
                     // Build full completion relative to the input path
                     let completion = if path_str.contains('/') || path_str.contains('\\') {
-                        // Reconstruct the full path
                         dir.join(name).to_string_lossy().to_string()
                     } else {
                         name.to_string()
                     };
                     
-                    // Add trailing slash for directories
-                    if entry.path().is_dir() {
-                        return Some(format!("{}/", completion));
-                    } else {
-                        return Some(completion);
-                    }
+                    // Get frecency score (higher = more frequently/recently used)
+                    let score = file_tracker.get_score(&completion);
+                    let is_dir = entry.path().is_dir();
+                    
+                    candidates.push((score, completion, is_dir));
                 }
+            }
+        }
+        
+        // Sort by frecency score (highest first), then alphabetically
+        candidates.sort_by(|a, b| {
+            b.0.partial_cmp(&a.0)
+                .unwrap()
+                .then_with(|| a.1.cmp(&b.1))
+        });
+        
+        // Return best match
+        if let Some((_, completion, is_dir)) = candidates.first() {
+            if *is_dir {
+                return Some(format!("{}/", completion));
+            } else {
+                return Some(completion.clone());
             }
         }
     }

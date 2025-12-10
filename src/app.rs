@@ -20,6 +20,7 @@ use crate::{
     context,
     custom_command_generator,
     embedding::EmbeddingCache,
+    file_access::FileAccessTracker,
     handlers::{dispatch_intent, AssistantEvent, IntentDispatcher},
     input::{expand_bang_shortcut, HistoryNavigation},
     intent::{self, ParsedIntent},
@@ -116,12 +117,20 @@ struct App {
     // Autocompletion state
     completion_provider: CompletionProvider,
     ghost_text: Option<String>,
+    file_tracker: FileAccessTracker,
 }
 
 impl App {
     fn new(config: Config, embedding_cache: Arc<EmbeddingCache>) -> Self {
         let (assistant_tx, assistant_rx) = mpsc::unbounded_channel();
         let embeddings_ready = embedding_cache.is_initialized();
+        
+        // Prepare file tracker path before moving config
+        let file_tracker_path = config.learned_path
+            .parent()
+            .unwrap_or(std::path::Path::new("."))
+            .join("file_access.toml");
+        
         let mut app = Self {
             config,
             session: SessionState::new(),
@@ -141,6 +150,7 @@ impl App {
             viewing_history: false,
             completion_provider: CompletionProvider::new(),
             ghost_text: None,
+            file_tracker: FileAccessTracker::load(&file_tracker_path),
         };
 
         let status = if embeddings_ready {
@@ -503,6 +513,7 @@ impl App {
             &self.session.cwd,
             &self.input_history,
             &learned,
+            &self.file_tracker,
         );
     }
     
@@ -513,6 +524,11 @@ impl App {
             // Update ghost text again in case there's more to complete
             self.update_ghost_text();
         }
+    }
+    
+    /// Record file access for frecency tracking.
+    fn record_file_access(&mut self, file_path: &str) {
+        self.file_tracker.record_access(file_path);
     }
 }
 
@@ -570,6 +586,10 @@ impl IntentDispatcher for App {
 
     fn record_output(&mut self, kind: &'static str, summary: &str, content: &str) {
         self.session.record_output(kind, summary, content);
+    }
+
+    fn record_file_access(&mut self, file_path: &str) {
+        self.record_file_access(file_path);
     }
 }
 

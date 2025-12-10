@@ -11,6 +11,7 @@ mod config;
 mod context;
 mod custom_command_generator;
 mod embedding;
+mod file_access;
 mod file_ops;
 mod fuzzy;
 mod handlers;

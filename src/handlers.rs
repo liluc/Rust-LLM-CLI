@@ -34,6 +34,7 @@ pub trait IntentDispatcher {
     fn pending_placeholder(&mut self) -> usize;
     fn set_session_cwd(&mut self, new_cwd: PathBuf);
     fn record_output(&mut self, kind: &'static str, summary: &str, content: &str);
+    fn record_file_access(&mut self, file_path: &str);
 }
 
 /// Dispatch a parsed intent to the appropriate handler.
@@ -401,6 +402,9 @@ fn handle_show_file_intent<D: IntentDispatcher>(
                 let line_count = contents.lines().count();
                 let summary = format!("{} ({} lines)", path.display(), line_count);
                 dispatcher.record_output("file", &summary, &contents);
+                
+                // Record file access for frecency tracking
+                dispatcher.record_file_access(&path.to_string_lossy());
                 
                 dispatcher.reply(format!(
                     "Contents of {}:\n{}",

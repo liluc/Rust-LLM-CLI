@@ -1,13 +1,15 @@
 # Autocompletion
 
-Ghost-text completion with smart path detection, similar to Cursor or GitHub Copilot.
+Ghost-text completion with smart path detection and frecency-based ranking.
 
 ## Core Structure
 
 ```
 src/completion.rs     CompletionProvider - fuzzy matching + path completion
+src/file_access.rs    FileAccessTracker - frecency tracking (frequency + recency)
 src/app.rs           Ghost text state + Tab key handling  
 src/ui.rs            Ghost text rendering (dim gray after cursor)
+src/handlers.rs      Record file access on show_file
 ```
 
 ## Completion Sources
@@ -43,7 +45,47 @@ A word is path-like if it:
 - **Type normally** - Ghost text updates in real-time
 - **Backspace** - Ghost text updates as you edit
 
+## Frecency-Based Path Ranking
+
+Path completions are sorted by **frecency score** (frequency × recency decay):
+
+```rust
+score = access_count * time_decay
+
+time_decay:
+  0-1 hours ago:   4.0×  (recent boost)
+  2-24 hours:      2.0×  (daily boost)
+  1-7 days:        1.0×  (normal)
+  1-4 weeks:       0.5×  (halved)
+  older:           0.25× (quarter)
+```
+
+### Example
+
+| File | Accesses | Last Used | Score | Rank |
+|------|----------|-----------|-------|------|
+| `src/main.rs` | 15 | 1 hour ago | 60.0 | 1st |
+| `src/app.rs` | 30 | 2 days ago | 30.0 | 2nd |
+| `src/old_test.rs` | 50 | 1 month ago | 25.0 | 3rd |
+
+Even though `old_test.rs` has the highest access count, `main.rs` ranks first due to recency.
+
+### Cross-Session Memory
+
+Access patterns persist in `.llm-cli/file_access.toml`:
+
+```toml
+[[accesses]]
+path = "src/main.rs"
+count = 15.0
+last_accessed = 1733875200
+```
+
+- **Bounded**: Max 500 entries, count capped at 100
+- **Auto-pruning**: Entries with score < 0.5 removed on load
+- **Per-project**: Each project tracks its own patterns
+
 ## Implementation
 
-`CompletionProvider::get_ghost_completion()` returns only the **suffix** to append. Fuzzy matching uses `SkimMatcherV2`, path completion uses `std::fs::read_dir()` for fast directory listing.
+`CompletionProvider::get_ghost_completion()` returns only the **suffix** to append. Fuzzy matching uses `SkimMatcherV2`, path completion uses `std::fs::read_dir()` sorted by frecency score.
 
