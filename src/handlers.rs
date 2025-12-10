@@ -106,6 +106,10 @@ pub fn dispatch_intent<D: IntentDispatcher>(
             handle_explain_project_intent(dispatcher);
             true
         }
+        "help" => {
+            handle_help_intent(dispatcher);
+            true
+        }
         "chat" => false, // Fall through to LLM chat
         _ => false,
     };
@@ -653,5 +657,108 @@ fn handle_explain_project_intent<D: IntentDispatcher>(dispatcher: &mut D) {
     } else {
         dispatcher.reply("No project detected in current directory.");
     }
+}
+
+fn handle_help_intent<D: IntentDispatcher>(dispatcher: &mut D) {
+    let help_text = r#"
+═══════════════════════════════════════════════════════════════════════════════
+                        LLM-POWERED CLI ASSISTANT                              
+═══════════════════════════════════════════════════════════════════════════════
+
+DESCRIPTION
+    A lightweight, Rust-based CLI assistant powered by local LLM inference.
+    Provides context-aware developer workflows, git automation, and natural
+    language interaction with your development environment.
+
+MODES
+    Chat Mode (default)
+        • Natural language conversations with AI
+        • Repository awareness and semantic context
+        • Intent classification for tool invocation
+        
+    Shell Mode (prefix: $ or ! or Ctrl+S to switch)
+        • Execute shell commands directly
+        • Built-in cd and pwd support
+        • Macro expansion for composable workflows
+
+KEY BINDINGS
+    Esc / q             Exit the application
+    Ctrl+S              Toggle between Chat and Shell mode
+    Tab                 Autocomplete (context-aware)
+    Enter               Submit current input
+    PgUp / PgDn         Scroll through conversation history
+    ↑ / ↓               Navigate input history
+
+COMMON COMMANDS
+
+  Git Workflows
+    save work           Stage all, commit with AI message, and push
+    push changes        Same as 'save work'
+    status              Show git status and diff summary
+    commit              Commit staged changes (without push)
+    stage all           Stage all changes with git add
+    draft commit        Generate commit message for staged changes
+
+  File Operations
+    show <file>         Display file contents
+    list files [path]   List directory contents
+    write file <path>   Create or overwrite a file (with confirmation)
+    find todos          Search for TODO/FIXME comments
+
+  Project Commands
+    build               Build the project (cargo/npm/etc.)
+    run tests           Run project test suite
+    explain project     Show project type and structure
+
+  Shell Commands
+    $ <command>         Execute a shell command
+    ! <command>         Execute a shell command (alias)
+    !!                  Repeat last shell command
+    cd <path>           Change current directory
+    pwd                 Show current directory
+
+  Other
+    help                Show this help message
+    ?                   Show this help message (alias)
+
+SEMANTIC CONTEXT
+    The CLI maintains semantic context from recent outputs. After running
+    commands like 'status' or 'show file', you can refer to them naturally:
+    
+    User: status
+    CLI:  [shows git status]
+    User: commit it
+    CLI:  [understands 'it' refers to the shown changes]
+
+CONFIGURATION
+    Config location: .llm-cli/config.toml (or ~/.config/llm-cli/config.toml)
+    
+    Customize:
+    • LLM model selection
+    • Streaming preferences  
+    • Output style (bullets/paragraph)
+    • Macros and custom commands
+
+REQUIREMENTS
+    • Ollama running locally (ollama.com)
+    • Default model: llama3 (configurable)
+    • Git (for repository commands)
+    • ripgrep (for code search, optional)
+
+MORE INFORMATION
+    Documentation: docs/
+    • QUICKSTART.md - Getting started guide
+    • SEMANTIC_CONTEXT.md - Context system details
+    • REPO_AWARENESS.md - Project detection features
+    • AUTOCOMPLETION.md - Completion system
+    • INTENT_SYSTEM.md - How commands are classified
+
+VERSION
+    llm-cli v0.1.0 (Rust-based, locally-powered)
+
+For specific questions, just ask naturally: "How do I stage specific files?"
+"#;
+
+    dispatcher.reply(help_text.to_string());
 }
 

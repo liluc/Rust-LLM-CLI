@@ -82,9 +82,9 @@ pub fn render_ui(f: &mut ratatui::Frame, view: AppView) {
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .title("Conversation (PgUp/PgDn scroll)"),
+                .title("Conversation"),
         )
-        .wrap(Wrap { trim: true });
+        .wrap(Wrap { trim: false });
     f.render_widget(log, chunks[0]);
 
     let mode_indicator = match view.input_mode {
@@ -109,7 +109,7 @@ pub fn render_ui(f: &mut ratatui::Frame, view: AppView) {
     let input = Paragraph::new(input_line).block(
         Block::default()
             .borders(Borders::ALL)
-            .title(format!("Input: {} | Tab to complete | Enter to submit", mode_indicator)),
+            .title(format!("Input: {}", mode_indicator)),
     );
     f.render_widget(input, chunks[1]);
 
@@ -118,27 +118,25 @@ pub fn render_ui(f: &mut ratatui::Frame, view: AppView) {
     let cursor_y = chunks[1].y + 1;
     f.set_cursor(cursor_x, cursor_y);
 
-    let status_text = Line::from(vec![
-        Span::raw("model: "),
+    let mut status_parts = vec![
         Span::raw(view.model).bold(),
-        Span::raw(" | streaming: "),
-        Span::raw(if view.streaming { "on" } else { "off" }).bold(),
-        Span::raw(" | style: bullets "),
-        Span::raw(" | cwd: "),
+        Span::raw(" | "),
         Span::raw(&view.cwd),
-        Span::raw(" | repo: "),
-        Span::raw(view.repo_root.as_deref().unwrap_or("-")),
-        Span::raw(" | pending: "),
-        Span::raw(view.pending_count.to_string()).bold(),
-        Span::raw(" | workflow: "),
-        Span::raw(if view.has_workflow {
-            "confirm"
-        } else {
-            "-"
-        })
-        .bold(),
-        Span::raw(" | mode: Ctrl+S | history: ↑/↓ | scroll: mouse/PgUp/PgDn | quit: Esc/q"),
-    ]);
+    ];
+    
+    // Only show pending count if there are pending responses
+    if view.pending_count > 0 {
+        status_parts.push(Span::raw(" | pending: "));
+        status_parts.push(Span::raw(view.pending_count.to_string()).bold());
+    }
+    
+    // Only show workflow when active
+    if view.has_workflow {
+        status_parts.push(Span::raw(" | "));
+        status_parts.push(Span::raw("workflow: confirm").bold());
+    }
+    
+    let status_text = Line::from(status_parts);
     let status = Paragraph::new(status_text);
     f.render_widget(status, chunks[2]);
 }
@@ -186,14 +184,18 @@ fn format_message_body(content: &str) -> Vec<String> {
     let mut lines_out = Vec::new();
 
     for line in content.replace('\r', "").lines() {
+        // Only trim trailing whitespace, preserve leading indentation
         let trimmed = line.trim_end();
-        if trimmed.contains('•') {
+        
+        // Check for bullet points after any leading whitespace
+        if let Some(bullet_pos) = trimmed.find('•') {
+            let indent = &trimmed[..bullet_pos];
             lines_out.extend(trimmed.split('•').filter_map(|chunk| {
                 let part = chunk.trim();
                 if part.is_empty() {
                     None
                 } else {
-                    Some(format!("• {part}"))
+                    Some(format!("{indent}• {part}"))
                 }
             }));
             continue;
@@ -213,38 +215,48 @@ fn wrap_text(text: &str, max_width: usize) -> Vec<String> {
         return vec![text.to_string()];
     }
     
-    let mut result = Vec::new();
-    let mut current_line = String::new();
-    let mut current_width = 0;
+    // Detect and preserve leading whitespace
+    let leading_spaces = text.len() - text.trim_start().len();
+    let indent = &text[..leading_spaces];
+    let content = &text[leading_spaces..];
     
-    for word in text.split_whitespace() {
+    // If the text fits on one line, return it as-is
+    if text.chars().count() <= max_width {
+        return vec![text.to_string()];
+    }
+    
+    let mut result = Vec::new();
+    let mut current_line = String::from(indent);
+    let mut current_width = leading_spaces;
+    
+    for word in content.split_whitespace() {
         let word_len = word.chars().count();
         
-        // If this is the first word in the line, add it regardless of length
-        if current_width == 0 {
+        // If this is the first word after indent
+        if current_width == leading_spaces {
             current_line.push_str(word);
-            current_width = word_len;
+            current_width += word_len;
         } else if current_width + 1 + word_len <= max_width {
             // Add space and word
             current_line.push(' ');
             current_line.push_str(word);
             current_width += 1 + word_len;
         } else {
-            // Start a new line
+            // Start a new line with same indentation
             result.push(current_line);
-            current_line = word.to_string();
-            current_width = word_len;
+            current_line = format!("{}{}", indent, word);
+            current_width = leading_spaces + word_len;
         }
     }
     
     // Add the last line if not empty
-    if !current_line.is_empty() {
+    if !current_line.trim().is_empty() {
         result.push(current_line);
     }
     
-    // If the input was empty or only whitespace, return at least one empty line
+    // If the input was empty or only whitespace, return at least one line
     if result.is_empty() {
-        result.push(String::new());
+        result.push(text.to_string());
     }
     
     result
