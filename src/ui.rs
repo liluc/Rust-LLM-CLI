@@ -60,6 +60,7 @@ pub struct AppView<'a> {
     pub repo_root: Option<String>,
     pub pending_count: usize,
     pub has_workflow: bool,
+    pub ghost_text: Option<&'a str>,
 }
 
 pub fn render_ui(f: &mut ratatui::Frame, view: AppView) {
@@ -91,29 +92,29 @@ pub fn render_ui(f: &mut ratatui::Frame, view: AppView) {
         InputMode::Shell => "Shell Mode (Ctrl+S for Chat)",
     };
     
-    // Calculate how much space we have for input text (account for borders)
+    // Build input text with ghost text
     let input_area_width = chunks[1].width.saturating_sub(2) as usize;
     let input_char_count = view.input.chars().count();
     
-    // If input is longer than field, scroll to show the end
-    let display_text = if input_char_count > input_area_width {
-        // Show the last N characters that fit
-        let start_char = input_char_count.saturating_sub(input_area_width);
-        view.input.chars().skip(start_char).collect::<String>()
+    // Create styled input with ghost text
+    let input_line = if let Some(ghost) = view.ghost_text {
+        Line::from(vec![
+            Span::raw(view.input),
+            Span::styled(ghost, Style::default().fg(Color::DarkGray)),
+        ])
     } else {
-        view.input.to_string()
+        Line::from(view.input)
     };
     
-    let input = Paragraph::new(display_text.as_str()).block(
+    let input = Paragraph::new(input_line).block(
         Block::default()
             .borders(Borders::ALL)
-            .title(format!("Input: {} | Enter to submit", mode_indicator)),
+            .title(format!("Input: {} | Tab to complete | Enter to submit", mode_indicator)),
     );
     f.render_widget(input, chunks[1]);
 
-    // Position cursor at the end of visible text
-    let visible_chars = display_text.chars().count().min(input_area_width);
-    let cursor_x = chunks[1].x + 1 + visible_chars as u16;
+    // Position cursor at the end of actual input (not ghost text)
+    let cursor_x = chunks[1].x + 1 + input_char_count.min(input_area_width) as u16;
     let cursor_y = chunks[1].y + 1;
     f.set_cursor(cursor_x, cursor_y);
 

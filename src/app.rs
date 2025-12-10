@@ -15,6 +15,7 @@ use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers, MouseEv
 use std::sync::Arc;
 
 use crate::{
+    completion::CompletionProvider,
     config::Config,
     context,
     custom_command_generator,
@@ -112,6 +113,9 @@ struct App {
     input_mode: InputMode,
     should_quit: bool,
     viewing_history: bool,
+    // Autocompletion state
+    completion_provider: CompletionProvider,
+    ghost_text: Option<String>,
 }
 
 impl App {
@@ -135,6 +139,8 @@ impl App {
             input_mode: InputMode::Chat,
             should_quit: false,
             viewing_history: false,
+            completion_provider: CompletionProvider::new(),
+            ghost_text: None,
         };
 
         let status = if embeddings_ready {
@@ -170,6 +176,7 @@ impl App {
                 .map(|p| p.to_string_lossy().to_string()),
             pending_count: self.pending_idxs.len(),
             has_workflow: self.pending_workflow.is_some(),
+            ghost_text: self.ghost_text.as_deref(),
         }
     }
 
@@ -477,6 +484,36 @@ impl App {
             self.messages.push(Message { role, content });
         }
     }
+    
+    /// Update ghost text based on current input.
+    fn update_ghost_text(&mut self) {
+        if self.input.is_empty() {
+            self.ghost_text = None;
+            return;
+        }
+        
+        // Load learned aliases
+        let learned_global = self.config.learned_path.clone();
+        let learned_project = self.session.repo_root.as_ref().map(|r| r.join(".llm-cli/learned.toml"));
+        let learned = LearnedAliases::load(&learned_global, learned_project.as_deref())
+            .unwrap_or_default();
+        
+        self.ghost_text = self.completion_provider.get_ghost_completion(
+            &self.input,
+            &self.session.cwd,
+            &self.input_history,
+            &learned,
+        );
+    }
+    
+    /// Accept the ghost text completion.
+    fn accept_ghost_text(&mut self) {
+        if let Some(ghost) = self.ghost_text.take() {
+            self.input.push_str(&ghost);
+            // Update ghost text again in case there's more to complete
+            self.update_ghost_text();
+        }
+    }
 }
 
 // Implement IntentDispatcher for App
@@ -562,6 +599,12 @@ fn handle_key_event(app: &mut App, key: crossterm::event::KeyEvent) {
         KeyCode::Char('q') => app.should_quit = true,
         KeyCode::Esc => app.should_quit = true,
         KeyCode::Enter => submit_input(app),
+        KeyCode::Tab => {
+            // Accept ghost text completion
+            if app.ghost_text.is_some() {
+                app.accept_ghost_text();
+            }
+        }
         KeyCode::Up => {
             recall_history_prev(app);
         }
@@ -576,9 +619,11 @@ fn handle_key_event(app: &mut App, key: crossterm::event::KeyEvent) {
         }
         KeyCode::Backspace => {
             app.input.pop();
+            app.update_ghost_text();
         }
         KeyCode::Char(ch) => {
             app.input.push(ch);
+            app.update_ghost_text();
         }
         _ => {}
     }
