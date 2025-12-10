@@ -261,8 +261,89 @@ impl App {
             let original_input = final_content.strip_prefix("__ASK_USER__:")
                 .unwrap_or("")
                 .to_string();
+            
+            // Try to generate a suggested command first
+            let tx = self.assistant_tx.clone();
+            let model = self.config.classifier_model.clone();
+            let original_input_clone = original_input.clone();
+            let repo_context = self.session.repo_info.as_ref().map(|info| {
+                let type_str = match info.project_type {
+                    crate::repo::ProjectType::Rust => "Rust",
+                    crate::repo::ProjectType::Node => "Node.js",
+                    crate::repo::ProjectType::Python => "Python",
+                    crate::repo::ProjectType::Go => "Go",
+                    crate::repo::ProjectType::Unknown => "Unknown",
+                };
+                format!("{} project", type_str)
+            });
+            
+            // Show a message that we're generating
+            self.reply(format!("💭 Generating suggested command for \"{}\"...", original_input));
+            
+            tokio::spawn(async move {
+                match custom_command_generator::generate_custom_command(
+                    &original_input_clone,
+                    &model,
+                    repo_context.as_deref(),
+                ).await {
+                    Ok(suggested_cmd) => {
+                        let _ = tx.send(AssistantEvent::Completed {
+                            idx: 0,
+                            content: Some(format!("__SUGGEST_COMMAND__:{}:{}", original_input_clone, suggested_cmd)),
+                        });
+                    }
+                    Err(_) => {
+                        // Fall back to user feedback prompt
+                        let _ = tx.send(AssistantEvent::Completed {
+                            idx: 0,
+                            content: Some(format!("__FALLBACK_ASK_USER__:{}", original_input_clone)),
+                        });
+                    }
+                }
+            });
+            return;
+        }
+        
+        // Handle command suggestion response
+        if final_content.starts_with("__SUGGEST_COMMAND__:") {
+            let parts: Vec<&str> = final_content.splitn(3, ':').collect();
+            if parts.len() >= 3 {
+                let original_input = parts[1];
+                let suggested_cmd = parts[2];
+                
+                self.reply(format!(
+                    "💡 Suggested command: `{}`\n\n\
+                     Options:\n\
+                     • [y]es - Execute it\n\
+                     • [s]ave - Save as custom command\n\
+                     • [e]dit - Provide a different command (cmd: ...)\n\
+                     • [n]o - Show tool selection menu instead",
+                    suggested_cmd
+                ));
+                
+                self.pending_workflow = Some(WorkflowState {
+                    kind: crate::workflow::WorkflowKind::CustomCommandConfirm {
+                        original_input: original_input.to_string(),
+                        generated_cmd: suggested_cmd.to_string(),
+                        save_path: self.session.repo_root.clone()
+                            .unwrap_or_else(|| self.session.cwd.clone())
+                            .join(".llm-cli/learned.toml"),
+                    },
+                    repo_root: self.session.repo_root.clone().unwrap_or_else(|| self.session.cwd.clone()),
+                });
+                
+                // Store original input for potential fallback
+                self.pending_user_feedback = Some(original_input.to_string());
+            }
+            return;
+        }
+        
+        // Handle fallback to ask user
+        if final_content.starts_with("__FALLBACK_ASK_USER__:") {
+            let original_input = final_content.strip_prefix("__FALLBACK_ASK_USER__:")
+                .unwrap_or("")
+                .to_string();
             self.pending_user_feedback = Some(original_input.clone());
-            // Show feedback prompt
             let feedback = user_feedback::generate_feedback_prompt(&original_input);
             self.reply(feedback);
             return;
@@ -296,9 +377,51 @@ impl App {
         self.upsert_message(idx, Role::Assistant, final_content.clone());
         self.session.record(Message {
             role: Role::Assistant,
-            content: final_content,
+            content: final_content.clone(),
         });
         self.pending_idxs.retain(|&i| i != idx);
+        
+        // Check if the response contains shell commands
+        let commands = crate::workflow::extract_commands_from_text(&final_content);
+        if !commands.is_empty() {
+            let combined = commands.join(" && ");
+            let original_query = self.input_history.last().cloned().unwrap_or_default();
+            
+            let msg = if commands.len() == 1 {
+                format!(
+                    "\n💡 Found command: `{}`\n\n\
+                     Options:\n\
+                     • [y]es - Execute it\n\
+                     • [s]ave - Save as custom command for \"{}\" \n\
+                     • [n]o - Skip",
+                    combined,
+                    original_query
+                )
+            } else {
+                format!(
+                    "\n💡 Found {} commands:\n{}\n\n\
+                     Combined: `{}`\n\n\
+                     Options:\n\
+                     • [y]es - Execute all\n\
+                     • [s]ave - Save as custom command for \"{}\"\n\
+                     • [n]o - Skip",
+                    commands.len(),
+                    commands.iter().map(|c| format!("  • {}", c)).collect::<Vec<_>>().join("\n"),
+                    combined,
+                    original_query
+                )
+            };
+            
+            self.reply(msg);
+            self.pending_workflow = Some(WorkflowState {
+                kind: crate::workflow::WorkflowKind::ChatCommandsConfirm {
+                    original_query,
+                    commands,
+                    combined_command: combined,
+                },
+                repo_root: self.session.repo_root.clone().unwrap_or_else(|| self.session.cwd.clone()),
+            });
+        }
     }
 
     fn fail_assistant(&mut self, idx: usize, error: String) {
@@ -686,6 +809,19 @@ fn handle_pending_workflow(app: &mut App, prompt: &str) {
             }
         } else {
             handle_workflow_response(app, workflow, prompt);
+            
+            // Check if the last message is the special feedback signal
+            if let Some(last_msg) = app.messages.last() {
+                if last_msg.content == "__SHOW_FEEDBACK_PROMPT__" {
+                    // Remove the signal message
+                    app.messages.pop();
+                    // Show feedback prompt if we have the original input
+                    if let Some(original_input) = &app.pending_user_feedback {
+                        let feedback = user_feedback::generate_feedback_prompt(original_input);
+                        app.reply(feedback);
+                    }
+                }
+            }
         }
     }
 }

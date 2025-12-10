@@ -94,16 +94,23 @@ The CLI uses semantic embedding-based intent matching to understand natural lang
 ### Testing
 - **Run tests**: `run tests`, `test`, `cargo test`, `run the tests`, `execute tests` → Runs `cargo test` in the repo.
 
-### Chat
-- **General chat**: Any other input that doesn't match a specific intent will be sent to the LLM for conversational response. Examples: `explain`, `what is`, `how do I`, `help me`, `tell me about`, `can you`.
+### Chat & Command Extraction
+- **General chat**: Any input that doesn't match a specific intent will be sent to the LLM for conversational response.
+- **Command extraction**: If the LLM's chat response contains shell commands (in code blocks or bullet points), the CLI will detect them and offer to:
+  - `[y]es` - Execute the commands
+  - `[s]ave` - Save as a custom command for future use
+  - `[n]o` - Skip execution
+- **Custom commands**: Saved commands can be reused by typing the exact phrase you used originally (e.g., "discard current changes").
 
 ## Semantic Intent Matching
 
-The CLI uses embedding-based semantic matching to understand user intent. When embeddings are available (via `nomic-embed-text` model), it compares your input against example phrases for each tool using cosine similarity. This allows natural language variations to be understood (e.g., "push my changes" matches "save_work" tool).
+The CLI uses a tiered intent resolution system:
+1. **Tier 1**: Fuzzy matching against learned commands and custom commands
+2. **Tier 2**: Embedding-based semantic matching (requires `nomic-embed-text`)
+3. **Tier 3**: Small LLM classifier (uses `qwen2:1.5b` to classify intent)
+4. **Tier 4**: For unknown intents, the CLI generates a suggested command using the LLM, then falls back to tool selection if declined
 
-If embeddings are not available, the CLI falls back to:
-1. Quick pattern matching for shell commands (`$`, `!`, `!!`)
-2. Direct LLM chat for everything else
+Custom commands are stored in `.llm-cli/custom_commands.toml` and have highest priority in matching.
 
 ## Workflow Confirmations
 
