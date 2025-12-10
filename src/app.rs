@@ -86,6 +86,8 @@ pub async fn run(config: Config) -> Result<()> {
         app.poll_assistant();
 
         if app.should_quit {
+            // Explicitly save frecency data before quitting
+            let _ = app.frecency.save();
             break;
         }
 
@@ -521,12 +523,61 @@ impl App {
     fn accept_ghost_text(&mut self) {
         if let Some(ghost) = self.ghost_text.take() {
             let completed = format!("{}{}", self.input, ghost);
+            
             // Record command usage for frecency
             self.frecency.record_command(&completed);
+            
+            // Check if completed text contains a file path and record it
+            self.record_files_in_text(&completed);
+            
             self.input = completed;
             // Update ghost text again in case there's more to complete
             self.update_ghost_text();
         }
+    }
+    
+    /// Extract and record any file paths mentioned in text.
+    fn record_files_in_text(&mut self, text: &str) {
+        // Extract potential file paths from the text
+        for word in text.split_whitespace() {
+            // Check if word looks like a file path and exists
+            if self.is_valid_file_path(word) {
+                self.frecency.record_file(word);
+            }
+        }
+    }
+    
+    /// Check if a word is a valid file path that exists.
+    fn is_valid_file_path(&self, word: &str) -> bool {
+        // Must contain path separator or have file extension
+        if !word.contains('/') && !word.contains('.') {
+            return false;
+        }
+        
+        // Skip URLs
+        if word.starts_with("http://") || word.starts_with("https://") {
+            return false;
+        }
+        
+        // Check if file exists relative to cwd or repo root
+        let path = std::path::Path::new(word);
+        if path.is_absolute() {
+            return path.exists();
+        }
+        
+        // Try relative to cwd
+        if self.session.cwd.join(path).exists() {
+            return true;
+        }
+        
+        // Try relative to repo root
+        if let Some(repo) = &self.session.repo_root {
+            if repo.join(path).exists() {
+                return true;
+            }
+        }
+        
+        false
     }
     
     /// Record file access for frecency tracking.
@@ -680,6 +731,9 @@ fn submit_input(app: &mut App) {
     if raw_input.is_empty() && app.pending_workflow.is_none() && app.pending_user_feedback.is_none() {
         return;
     }
+    
+    // Track any file paths mentioned in the input
+    app.record_files_in_text(&raw_input);
 
     app.history_idx = None;
     app.input.clear();

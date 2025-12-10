@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
@@ -73,12 +73,14 @@ impl FrecencyTracker {
         toml::from_str(&contents).context("parsing frecency.toml")
     }
     
-    /// Record a file access.
+    /// Record a file access and save asynchronously.
     pub fn record_file(&mut self, file_path: &str) {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_secs();
+        
+        tracing::debug!("Recording file access: {}", file_path);
         
         self.file_entries
             .entry(file_path.to_string())
@@ -93,9 +95,10 @@ impl FrecencyTracker {
             });
         
         self.dirty = true;
+        self.save_async();
     }
     
-    /// Record a command usage.
+    /// Record a command usage and save asynchronously.
     pub fn record_command(&mut self, command: &str) {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -115,6 +118,26 @@ impl FrecencyTracker {
             });
         
         self.dirty = true;
+        self.save_async();
+    }
+    
+    /// Save asynchronously (non-blocking).
+    fn save_async(&self) {
+        if !self.dirty {
+            return;
+        }
+        
+        // Clone data for async task
+        let files: Vec<_> = self.file_entries.values().cloned().collect();
+        let commands: Vec<_> = self.command_entries.values().cloned().collect();
+        let path = self.config_path.clone();
+        
+        // Spawn async save task
+        tokio::spawn(async move {
+            if let Err(e) = save_to_disk(files, commands, path).await {
+                tracing::warn!("Failed to save frecency data: {}", e);
+            }
+        });
     }
     
     /// Get frecency score for a file path.
@@ -192,8 +215,44 @@ impl FrecencyTracker {
     }
 }
 
+/// Async save helper.
+async fn save_to_disk(
+    mut files: Vec<AccessEntry>,
+    mut commands: Vec<AccessEntry>,
+    path: PathBuf,
+) -> Result<()> {
+    // Sort and keep top entries
+    files.sort_by(|a, b| {
+        FrecencyTracker::calculate_score(b)
+            .partial_cmp(&FrecencyTracker::calculate_score(a))
+            .unwrap()
+    });
+    files.truncate(MAX_ENTRIES);
+    
+    commands.sort_by(|a, b| {
+        FrecencyTracker::calculate_score(b)
+            .partial_cmp(&FrecencyTracker::calculate_score(a))
+            .unwrap()
+    });
+    commands.truncate(MAX_ENTRIES);
+    
+    let data = FrecencyData { files, commands };
+    
+    // Ensure parent directory exists
+    if let Some(parent) = path.parent() {
+        tokio::fs::create_dir_all(parent).await?;
+    }
+    
+    let contents = toml::to_string_pretty(&data)?;
+    tokio::fs::write(&path, contents).await?;
+    
+    tracing::debug!("Saved frecency data to {:?}", path);
+    Ok(())
+}
+
 impl Drop for FrecencyTracker {
     fn drop(&mut self) {
+        // Sync save on drop (app is exiting anyway)
         let _ = self.save();
     }
 }
