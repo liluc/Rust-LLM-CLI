@@ -6,7 +6,7 @@ use std::path::Path;
 use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
 
-use crate::{file_access::FileAccessTracker, learned::LearnedAliases, tools::TOOLS};
+use crate::{frecency::FrecencyTracker, learned::LearnedAliases, tools::TOOLS};
 
 pub struct CompletionProvider {
     tool_examples: Vec<String>,
@@ -37,7 +37,7 @@ impl CompletionProvider {
         cwd: &Path,
         history: &[String],
         learned: &LearnedAliases,
-        file_tracker: &FileAccessTracker,
+        frecency: &FrecencyTracker,
     ) -> Option<String> {
         if input.is_empty() {
             return None;
@@ -48,7 +48,7 @@ impl CompletionProvider {
         
         // Check if last word is path-like
         if is_path_like(last_word, cwd) {
-            if let Some(path_completion) = complete_path(last_word, cwd, file_tracker) {
+            if let Some(path_completion) = complete_path(last_word, cwd, frecency) {
                 // Return only the suffix beyond the last word
                 if path_completion.len() > last_word.len() {
                     return Some(path_completion[last_word.len()..].to_string());
@@ -57,7 +57,7 @@ impl CompletionProvider {
         }
         
         // Full input fuzzy matching
-        let best_match = self.get_best_match(input, history, learned)?;
+        let best_match = self.get_best_match(input, history, learned, frecency)?;
         
         // Return only the suffix
         if best_match.len() > input.len() && best_match.starts_with(input) {
@@ -72,17 +72,16 @@ impl CompletionProvider {
         prefix: &str,
         history: &[String],
         learned: &LearnedAliases,
+        frecency: &FrecencyTracker,
     ) -> Option<String> {
-        let mut best_score = 0;
-        let mut best_match: Option<String> = None;
+        let mut candidates = Vec::new();
         
         // Check tool examples
         for example in &self.tool_examples {
-            if let Some(score) = self.matcher.fuzzy_match(example, prefix) {
-                if score > best_score {
-                    best_score = score;
-                    best_match = Some(example.clone());
-                }
+            if let Some(fuzzy_score) = self.matcher.fuzzy_match(example, prefix) {
+                let frecency_score = frecency.get_command_score(example);
+                let combined = fuzzy_score as f64 + (frecency_score * 10.0); // Boost frecency
+                candidates.push((combined, example.clone()));
             }
         }
         
@@ -95,25 +94,25 @@ impl CompletionProvider {
                 .map(|s| s.trim())
                 .unwrap_or(entry);
             
-            if let Some(score) = self.matcher.fuzzy_match(display, prefix) {
-                if score > best_score {
-                    best_score = score;
-                    best_match = Some(display.to_string());
-                }
+            if let Some(fuzzy_score) = self.matcher.fuzzy_match(display, prefix) {
+                let frecency_score = frecency.get_command_score(display);
+                let combined = fuzzy_score as f64 + (frecency_score * 10.0);
+                candidates.push((combined, display.to_string()));
             }
         }
         
         // Check learned aliases
         for alias in learned.get_all_phrases() {
-            if let Some(score) = self.matcher.fuzzy_match(&alias, prefix) {
-                if score > best_score {
-                    best_score = score;
-                    best_match = Some(alias);
-                }
+            if let Some(fuzzy_score) = self.matcher.fuzzy_match(&alias, prefix) {
+                let frecency_score = frecency.get_command_score(&alias);
+                let combined = fuzzy_score as f64 + (frecency_score * 10.0);
+                candidates.push((combined, alias));
             }
         }
         
-        best_match
+        // Sort by combined score and return best
+        candidates.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap());
+        candidates.first().map(|(_, cmd)| cmd.clone())
     }
 }
 
@@ -139,7 +138,7 @@ fn is_path_like(word: &str, cwd: &Path) -> bool {
 
 /// Complete a path by listing matching files/folders.
 /// Uses frecency scoring to prioritize frequently/recently accessed files.
-fn complete_path(partial: &str, cwd: &Path, file_tracker: &FileAccessTracker) -> Option<String> {
+fn complete_path(partial: &str, cwd: &Path, frecency: &FrecencyTracker) -> Option<String> {
     // Handle relative paths
     let path_str = if partial.starts_with('~') {
         // Expand home directory
@@ -204,7 +203,7 @@ fn complete_path(partial: &str, cwd: &Path, file_tracker: &FileAccessTracker) ->
                     };
                     
                     // Get frecency score (higher = more frequently/recently used)
-                    let score = file_tracker.get_score(&completion);
+                    let score = frecency.get_file_score(&completion);
                     let is_dir = entry.path().is_dir();
                     
                     candidates.push((score, completion, is_dir));

@@ -35,6 +35,7 @@ pub trait IntentDispatcher {
     fn set_session_cwd(&mut self, new_cwd: PathBuf);
     fn record_output(&mut self, kind: &'static str, summary: &str, content: &str);
     fn record_file_access(&mut self, file_path: &str);
+    fn record_command_usage(&mut self, command: &str);
 }
 
 /// Dispatch a parsed intent to the appropriate handler.
@@ -44,7 +45,7 @@ pub fn dispatch_intent<D: IntentDispatcher>(
     intent: &ParsedIntent,
     original_input: &str,
 ) -> bool {
-    match intent.tool.as_str() {
+    let handled = match intent.tool.as_str() {
         "shell" => {
             if let Some(cmd) = &intent.args.command {
                 handle_shell_dispatch(dispatcher, cmd);
@@ -107,7 +108,14 @@ pub fn dispatch_intent<D: IntentDispatcher>(
         }
         "chat" => false, // Fall through to LLM chat
         _ => false,
+    };
+    
+    // Record command usage for frecency tracking
+    if handled {
+        dispatcher.record_command_usage(original_input);
     }
+    
+    handled
 }
 
 pub fn handle_shell_dispatch<D: IntentDispatcher>(dispatcher: &mut D, cmd: &str) {

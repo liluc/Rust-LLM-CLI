@@ -20,7 +20,7 @@ use crate::{
     context,
     custom_command_generator,
     embedding::EmbeddingCache,
-    file_access::FileAccessTracker,
+    frecency::FrecencyTracker,
     handlers::{dispatch_intent, AssistantEvent, IntentDispatcher},
     input::{expand_bang_shortcut, HistoryNavigation},
     intent::{self, ParsedIntent},
@@ -117,7 +117,7 @@ struct App {
     // Autocompletion state
     completion_provider: CompletionProvider,
     ghost_text: Option<String>,
-    file_tracker: FileAccessTracker,
+    frecency: FrecencyTracker,
 }
 
 impl App {
@@ -125,11 +125,11 @@ impl App {
         let (assistant_tx, assistant_rx) = mpsc::unbounded_channel();
         let embeddings_ready = embedding_cache.is_initialized();
         
-        // Prepare file tracker path before moving config
-        let file_tracker_path = config.learned_path
+        // Prepare frecency tracker path before moving config
+        let frecency_path = config.learned_path
             .parent()
             .unwrap_or(std::path::Path::new("."))
-            .join("file_access.toml");
+            .join("frecency.toml");
         
         let mut app = Self {
             config,
@@ -150,7 +150,7 @@ impl App {
             viewing_history: false,
             completion_provider: CompletionProvider::new(),
             ghost_text: None,
-            file_tracker: FileAccessTracker::load(&file_tracker_path),
+            frecency: FrecencyTracker::load(&frecency_path),
         };
 
         let status = if embeddings_ready {
@@ -513,14 +513,17 @@ impl App {
             &self.session.cwd,
             &self.input_history,
             &learned,
-            &self.file_tracker,
+            &self.frecency,
         );
     }
     
     /// Accept the ghost text completion.
     fn accept_ghost_text(&mut self) {
         if let Some(ghost) = self.ghost_text.take() {
-            self.input.push_str(&ghost);
+            let completed = format!("{}{}", self.input, ghost);
+            // Record command usage for frecency
+            self.frecency.record_command(&completed);
+            self.input = completed;
             // Update ghost text again in case there's more to complete
             self.update_ghost_text();
         }
@@ -528,7 +531,12 @@ impl App {
     
     /// Record file access for frecency tracking.
     fn record_file_access(&mut self, file_path: &str) {
-        self.file_tracker.record_access(file_path);
+        self.frecency.record_file(file_path);
+    }
+    
+    /// Record command usage for frecency tracking.
+    fn record_command_usage(&mut self, command: &str) {
+        self.frecency.record_command(command);
     }
 }
 
@@ -590,6 +598,10 @@ impl IntentDispatcher for App {
 
     fn record_file_access(&mut self, file_path: &str) {
         self.record_file_access(file_path);
+    }
+    
+    fn record_command_usage(&mut self, command: &str) {
+        self.record_command_usage(command);
     }
 }
 

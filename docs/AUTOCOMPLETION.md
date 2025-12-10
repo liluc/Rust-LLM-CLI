@@ -6,10 +6,10 @@ Ghost-text completion with smart path detection and frecency-based ranking.
 
 ```
 src/completion.rs     CompletionProvider - fuzzy matching + path completion
-src/file_access.rs    FileAccessTracker - frecency tracking (frequency + recency)
+src/frecency.rs       FrecencyTracker - tracks files AND commands
 src/app.rs           Ghost text state + Tab key handling  
 src/ui.rs            Ghost text rendering (dim gray after cursor)
-src/handlers.rs      Record file access on show_file
+src/handlers.rs      Records: file access + command usage
 ```
 
 ## Completion Sources
@@ -45,9 +45,9 @@ A word is path-like if it:
 - **Type normally** - Ghost text updates in real-time
 - **Backspace** - Ghost text updates as you edit
 
-## Frecency-Based Path Ranking
+## Frecency-Based Ranking
 
-Path completions are sorted by **frecency score** (frequency × recency decay):
+Both **files** and **commands** are ranked by **frecency score** (frequency × recency decay):
 
 ```rust
 score = access_count * time_decay
@@ -60,7 +60,7 @@ time_decay:
   older:           0.25× (quarter)
 ```
 
-### Example
+### Example: File Completion
 
 | File | Accesses | Last Used | Score | Rank |
 |------|----------|-----------|-------|------|
@@ -68,22 +68,49 @@ time_decay:
 | `src/app.rs` | 30 | 2 days ago | 30.0 | 2nd |
 | `src/old_test.rs` | 50 | 1 month ago | 25.0 | 3rd |
 
-Even though `old_test.rs` has the highest access count, `main.rs` ranks first due to recency.
+### Example: Command Completion
+
+```
+You type: "sav"
+
+Without frecency:
+  Ghost: "e work to remote" (alphabetically first)
+
+With frecency (20 uses, 1 hour ago):
+  Ghost: "e work to remote" (score: 80.0)
+
+After 1 week of using "save changes locally" instead:
+  Ghost: "e changes locally" (now higher score)
+```
 
 ### Cross-Session Memory
 
-Access patterns persist in `.llm-cli/file_access.toml`:
+Access patterns persist in `.llm-cli/frecency.toml`:
 
 ```toml
-[[accesses]]
+[[files]]
 path = "src/main.rs"
 count = 15.0
 last_accessed = 1733875200
+
+[[commands]]
+path = "save work to remote"
+count = 20.0
+last_accessed = 1733875300
 ```
 
-- **Bounded**: Max 500 entries, count capped at 100
+- **Bounded**: Max 500 files + 500 commands
+- **Count capped**: At 100 per entry
 - **Auto-pruning**: Entries with score < 0.5 removed on load
 - **Per-project**: Each project tracks its own patterns
+
+### What Gets Recorded
+
+| Event | Tracked |
+|-------|---------|
+| Tab accepted | The completed command/phrase |
+| Tool executed | Original user input |
+| File opened | File path |
 
 ## Implementation
 

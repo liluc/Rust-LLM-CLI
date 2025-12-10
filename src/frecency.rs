@@ -1,7 +1,7 @@
-//! File access tracking for frecency-based path completion.
+//! Frecency tracking for intelligent completion ranking.
 //!
-//! Tracks file access patterns (frequency + recency) to prioritize
-//! commonly/recently used files in completions.
+//! Tracks file and command access patterns (frequency + recency) to prioritize
+//! commonly/recently used items in completions.
 
 use std::collections::HashMap;
 use std::fs;
@@ -23,32 +23,42 @@ pub struct AccessEntry {
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
-struct AccessData {
+struct FrecencyData {
     #[serde(default)]
-    accesses: Vec<AccessEntry>,
+    files: Vec<AccessEntry>,
+    #[serde(default)]
+    commands: Vec<AccessEntry>,
 }
 
-pub struct FileAccessTracker {
-    entries: HashMap<String, AccessEntry>,
+pub struct FrecencyTracker {
+    file_entries: HashMap<String, AccessEntry>,
+    command_entries: HashMap<String, AccessEntry>,
     config_path: std::path::PathBuf,
     dirty: bool,
 }
 
-impl FileAccessTracker {
+impl FrecencyTracker {
     /// Load tracker from config file.
     pub fn load(config_path: &Path) -> Self {
         let mut tracker = Self {
-            entries: HashMap::new(),
+            file_entries: HashMap::new(),
+            command_entries: HashMap::new(),
             config_path: config_path.to_path_buf(),
             dirty: false,
         };
         
         if config_path.exists() {
             if let Ok(data) = Self::load_from_file(config_path) {
-                // Load and prune stale entries
-                for entry in data.accesses {
+                // Load and prune stale file entries
+                for entry in data.files {
                     if Self::calculate_score(&entry) > MIN_SCORE_THRESHOLD {
-                        tracker.entries.insert(entry.path.clone(), entry);
+                        tracker.file_entries.insert(entry.path.clone(), entry);
+                    }
+                }
+                // Load and prune stale command entries
+                for entry in data.commands {
+                    if Self::calculate_score(&entry) > MIN_SCORE_THRESHOLD {
+                        tracker.command_entries.insert(entry.path.clone(), entry);
                     }
                 }
             }
@@ -57,20 +67,20 @@ impl FileAccessTracker {
         tracker
     }
     
-    fn load_from_file(path: &Path) -> Result<AccessData> {
+    fn load_from_file(path: &Path) -> Result<FrecencyData> {
         let contents = fs::read_to_string(path)
-            .with_context(|| format!("reading file access data from {}", path.display()))?;
-        toml::from_str(&contents).context("parsing file_access.toml")
+            .with_context(|| format!("reading frecency data from {}", path.display()))?;
+        toml::from_str(&contents).context("parsing frecency.toml")
     }
     
     /// Record a file access.
-    pub fn record_access(&mut self, file_path: &str) {
+    pub fn record_file(&mut self, file_path: &str) {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_secs();
         
-        self.entries
+        self.file_entries
             .entry(file_path.to_string())
             .and_modify(|e| {
                 e.count = (e.count + 1.0).min(MAX_COUNT);
@@ -85,10 +95,40 @@ impl FileAccessTracker {
         self.dirty = true;
     }
     
+    /// Record a command usage.
+    pub fn record_command(&mut self, command: &str) {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        
+        self.command_entries
+            .entry(command.to_string())
+            .and_modify(|e| {
+                e.count = (e.count + 1.0).min(MAX_COUNT);
+                e.last_accessed = now;
+            })
+            .or_insert(AccessEntry {
+                path: command.to_string(),
+                count: 1.0,
+                last_accessed: now,
+            });
+        
+        self.dirty = true;
+    }
+    
     /// Get frecency score for a file path.
-    pub fn get_score(&self, file_path: &str) -> f64 {
-        self.entries
+    pub fn get_file_score(&self, file_path: &str) -> f64 {
+        self.file_entries
             .get(file_path)
+            .map(Self::calculate_score)
+            .unwrap_or(0.0)
+    }
+    
+    /// Get frecency score for a command.
+    pub fn get_command_score(&self, command: &str) -> f64 {
+        self.command_entries
+            .get(command)
             .map(Self::calculate_score)
             .unwrap_or(0.0)
     }
@@ -119,16 +159,25 @@ impl FileAccessTracker {
             return Ok(());
         }
         
-        // Sort by score and keep top entries
-        let mut entries: Vec<_> = self.entries.values().cloned().collect();
-        entries.sort_by(|a, b| {
+        // Sort and keep top file entries
+        let mut files: Vec<_> = self.file_entries.values().cloned().collect();
+        files.sort_by(|a, b| {
             Self::calculate_score(b)
                 .partial_cmp(&Self::calculate_score(a))
                 .unwrap()
         });
-        entries.truncate(MAX_ENTRIES);
+        files.truncate(MAX_ENTRIES);
         
-        let data = AccessData { accesses: entries };
+        // Sort and keep top command entries
+        let mut commands: Vec<_> = self.command_entries.values().cloned().collect();
+        commands.sort_by(|a, b| {
+            Self::calculate_score(b)
+                .partial_cmp(&Self::calculate_score(a))
+                .unwrap()
+        });
+        commands.truncate(MAX_ENTRIES);
+        
+        let data = FrecencyData { files, commands };
         
         // Ensure parent directory exists
         if let Some(parent) = self.config_path.parent() {
@@ -143,7 +192,7 @@ impl FileAccessTracker {
     }
 }
 
-impl Drop for FileAccessTracker {
+impl Drop for FrecencyTracker {
     fn drop(&mut self) {
         let _ = self.save();
     }
