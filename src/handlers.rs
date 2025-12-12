@@ -110,6 +110,14 @@ pub fn dispatch_intent<D: IntentDispatcher>(
             handle_help_intent(dispatcher);
             true
         }
+        "register_workflow" => {
+            handle_register_workflow_intent(dispatcher);
+            true
+        }
+        "execute_workflow" => {
+            // This is handled in app.rs with access to workflows
+            false
+        }
         "chat" => false, // Fall through to LLM chat
         _ => false,
     };
@@ -657,6 +665,17 @@ fn handle_explain_project_intent<D: IntentDispatcher>(dispatcher: &mut D) {
     } else {
         dispatcher.reply("No project detected in current directory.");
     }
+}
+
+fn handle_register_workflow_intent<D: IntentDispatcher>(dispatcher: &mut D) {
+    dispatcher.reply(
+        "Let's create a new workflow!\n\n\
+         What would you like to call it? (e.g., 'deploy to staging', 'full ci pipeline')"
+    );
+    dispatcher.set_pending_workflow(WorkflowState {
+        kind: WorkflowKind::WorkflowRegistrationName,
+        repo_root: dispatcher.get_session_repo_root().unwrap_or_else(|| dispatcher.get_session_cwd()),
+    });
 }
 
 fn handle_help_intent<D: IntentDispatcher>(dispatcher: &mut D) {

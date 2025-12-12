@@ -140,6 +140,10 @@ fn clean_generated_command(cmd: &str) -> String {
 /// 
 /// Supported placeholders:
 /// - {{GEN_COMMIT_MSG}} - Generate commit message from staged changes
+/// - {{GEN_SUMMARY}} - Generate summary of recent changes
+/// - {{GEN_PR_TITLE}} - Generate pull request title
+/// - {{GEN_RELEASE_NOTES}} - Generate release notes from commits
+/// - {{ASK_LLM:question}} - Ask LLM a custom question
 pub fn expand_command_handlers(
     command: &str,
     config: &Config,
@@ -169,6 +173,140 @@ pub fn expand_command_handlers(
         }
         
         expanded = expanded.replace("{{GEN_COMMIT_MSG}}", &commit_cmd);
+    }
+    
+    // Handle {{GEN_SUMMARY}} placeholder
+    if expanded.contains("{{GEN_SUMMARY}}") {
+        let summary = generate_summary(config, repo_root)
+            .unwrap_or_else(|_| "Recent changes".to_string());
+        expanded = expanded.replace("{{GEN_SUMMARY}}", &summary.replace('"', "\\\""));
+    }
+    
+    // Handle {{GEN_PR_TITLE}} placeholder
+    if expanded.contains("{{GEN_PR_TITLE}}") {
+        let pr_title = generate_pr_title(config, repo_root)
+            .unwrap_or_else(|_| "Update".to_string());
+        expanded = expanded.replace("{{GEN_PR_TITLE}}", &pr_title.replace('"', "\\\""));
+    }
+    
+    // Handle {{GEN_RELEASE_NOTES}} placeholder
+    if expanded.contains("{{GEN_RELEASE_NOTES}}") {
+        let notes = generate_release_notes(config, repo_root)
+            .unwrap_or_else(|_| "Release notes".to_string());
+        expanded = expanded.replace("{{GEN_RELEASE_NOTES}}", &notes.replace('"', "\\\""));
+    }
+    
+    // Handle {{ASK_LLM:question}} pattern
+    expanded = expand_ask_llm_placeholders(&expanded, config)?;
+    
+    Ok(expanded)
+}
+
+/// Generate a summary of recent changes using git diff.
+fn generate_summary(_config: &Config, repo_root: &Path) -> Result<String> {
+    use std::process::Command;
+    
+    // Get git diff summary
+    let output = Command::new("git")
+        .arg("diff")
+        .arg("--stat")
+        .arg("HEAD")
+        .current_dir(repo_root)
+        .output()
+        .context("running git diff --stat")?;
+    
+    if !output.status.success() {
+        anyhow::bail!("git diff failed");
+    }
+    
+    let diff_stat = String::from_utf8_lossy(&output.stdout);
+    
+    if diff_stat.trim().is_empty() {
+        return Ok("No changes".to_string());
+    }
+    
+    // Extract just the summary line (last line usually)
+    let lines: Vec<&str> = diff_stat.lines().collect();
+    if let Some(last_line) = lines.last() {
+        if last_line.contains("file") && (last_line.contains("insertion") || last_line.contains("deletion")) {
+            return Ok(last_line.trim().to_string());
+        }
+    }
+    
+    Ok(format!("{} files changed", lines.len()))
+}
+
+/// Generate a pull request title from recent commits.
+fn generate_pr_title(_config: &Config, repo_root: &Path) -> Result<String> {
+    use std::process::Command;
+    
+    // Get the most recent commit message
+    let output = Command::new("git")
+        .arg("log")
+        .arg("-1")
+        .arg("--pretty=format:%s")
+        .current_dir(repo_root)
+        .output()
+        .context("running git log")?;
+    
+    if !output.status.success() {
+        anyhow::bail!("git log failed");
+    }
+    
+    let commit_subject = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    
+    if commit_subject.is_empty() {
+        return Ok("Update".to_string());
+    }
+    
+    Ok(commit_subject)
+}
+
+/// Generate release notes from recent commits.
+fn generate_release_notes(_config: &Config, repo_root: &Path) -> Result<String> {
+    use std::process::Command;
+    
+    // Get commits since last tag (or all if no tags)
+    let output = Command::new("git")
+        .arg("log")
+        .arg("--pretty=format:- %s")
+        .arg("--no-merges")
+        .current_dir(repo_root)
+        .output()
+        .context("running git log")?;
+    
+    if !output.status.success() {
+        anyhow::bail!("git log failed");
+    }
+    
+    let notes = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    
+    if notes.is_empty() {
+        return Ok("No commits".to_string());
+    }
+    
+    // Limit to first 10 commits
+    let lines: Vec<&str> = notes.lines().take(10).collect();
+    Ok(lines.join("\n"))
+}
+
+/// Expand {{ASK_LLM:question}} placeholders by calling the LLM.
+fn expand_ask_llm_placeholders(command: &str, _config: &Config) -> Result<String> {
+    use regex::Regex;
+    
+    let re = Regex::new(r"\{\{ASK_LLM:([^}]+)\}\}").unwrap();
+    let mut expanded = command.to_string();
+    
+    for cap in re.captures_iter(command) {
+        if let Some(question) = cap.get(1) {
+            let question_text = question.as_str();
+            let placeholder = &cap[0];
+            
+            // For now, return a placeholder message
+            // In a real implementation, this would call the LLM asynchronously
+            let answer = format!("[LLM: {}]", question_text);
+            expanded = expanded.replace(placeholder, &answer.replace('"', "\\\""));
+        }
     }
     
     Ok(expanded)

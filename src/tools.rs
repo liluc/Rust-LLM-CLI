@@ -227,6 +227,19 @@ pub static TOOLS: &[Tool] = &[
         requires_repo: false,
     },
     Tool {
+        name: "register_workflow",
+        description: "Register a new multi-step workflow with a name and steps",
+        examples: &[
+            "register workflow",
+            "create workflow",
+            "new workflow",
+            "save workflow",
+            "make a workflow",
+            "define workflow",
+        ],
+        requires_repo: false,
+    },
+    Tool {
         name: "help",
         description: "Show comprehensive help information about the CLI, commands, and key bindings",
         examples: &[

@@ -36,11 +36,20 @@ pub fn generate_feedback_prompt(input: &str) -> String {
     prompt
 }
 
+/// Workflow definition from inline syntax.
+#[derive(Debug, Clone)]
+pub struct WorkflowDefinition {
+    pub name: String,
+    pub steps: Vec<(String, String)>,  // (step_name, command)
+    pub parameters: Vec<String>,  // Extracted {param} names
+}
+
 /// Feedback response type.
 pub enum FeedbackResponse {
     ToolSelection(usize),
     ExplicitCommand(String),
     NaturalLanguageDescription(String),
+    WorkflowInline(WorkflowDefinition),
     None,
     Invalid,
 }
@@ -52,6 +61,11 @@ pub fn parse_feedback_response(response: &str) -> FeedbackResponse {
     // Check for "none"
     if trimmed.to_lowercase() == "none" {
         return FeedbackResponse::None;
+    }
+    
+    // Check for workflow inline syntax (starts with "workflow:")
+    if let Some(workflow_def) = parse_workflow_syntax(response) {
+        return FeedbackResponse::WorkflowInline(workflow_def);
     }
     
     // Check for explicit command definition (starts with "cmd:" or legacy "macro:")
@@ -79,6 +93,110 @@ pub fn parse_feedback_response(response: &str) -> FeedbackResponse {
     }
     
     FeedbackResponse::Invalid
+}
+
+/// Parse workflow inline syntax.
+/// 
+/// Supported formats:
+/// - Simple: "workflow: name = command"
+/// - Multi-step:
+///   "workflow: name
+///    step1: command1
+///    step2: command2"
+/// - With parameters: "workflow: deploy to {env}"
+pub fn parse_workflow_syntax(input: &str) -> Option<WorkflowDefinition> {
+    let trimmed = input.trim();
+    
+    // Check if it starts with "workflow:"
+    let workflow_prefix = "workflow:";
+    if !trimmed.to_lowercase().starts_with(workflow_prefix) {
+        return None;
+    }
+    
+    let content = &trimmed[workflow_prefix.len()..].trim();
+    let lines: Vec<&str> = content.lines().map(|l| l.trim()).collect();
+    
+    if lines.is_empty() {
+        return None;
+    }
+    
+    // Parse first line for workflow name
+    let first_line = lines[0];
+    
+    // Check for simple format: "name = command"
+    if let Some(eq_pos) = first_line.find('=') {
+        let name = first_line[..eq_pos].trim().to_string();
+        let command = first_line[eq_pos + 1..].trim().to_string();
+        
+        if name.is_empty() || command.is_empty() {
+            return None;
+        }
+        
+        // Extract parameters from name
+        let parameters = extract_parameters_from_text(&name);
+        
+        return Some(WorkflowDefinition {
+            name,
+            steps: vec![("main".to_string(), command)],
+            parameters,
+        });
+    }
+    
+    // Otherwise, multi-step format
+    let name = first_line.to_string();
+    let mut steps = Vec::new();
+    
+    // Parse remaining lines as "step_name: command"
+    for line in &lines[1..] {
+        if let Some(colon_pos) = line.find(':') {
+            let step_name = line[..colon_pos].trim().to_string();
+            let command = line[colon_pos + 1..].trim().to_string();
+            
+            if !step_name.is_empty() && !command.is_empty() {
+                steps.push((step_name, command));
+            }
+        }
+    }
+    
+    if steps.is_empty() {
+        return None;
+    }
+    
+    // Extract parameters from all commands and name
+    let mut parameters = extract_parameters_from_text(&name);
+    for (_, command) in &steps {
+        parameters.extend(extract_parameters_from_text(command));
+    }
+    
+    // Remove duplicates
+    parameters.sort();
+    parameters.dedup();
+    
+    Some(WorkflowDefinition {
+        name,
+        steps,
+        parameters,
+    })
+}
+
+/// Extract parameter names from text containing {param} placeholders.
+fn extract_parameters_from_text(text: &str) -> Vec<String> {
+    use regex::Regex;
+    
+    let re = Regex::new(r"\{([^}]+)\}").unwrap();
+    let mut params = Vec::new();
+    
+    for cap in re.captures_iter(text) {
+        if let Some(param) = cap.get(1) {
+            let param_name = param.as_str();
+            // Skip LLM placeholders (uppercase with _)
+            if !param_name.contains("_") || param_name.chars().any(|c| c.is_lowercase()) {
+                params.push(param_name.to_string());
+            }
+        }
+    }
+    
+    params
 }
 
 #[cfg(test)]
@@ -163,6 +281,46 @@ mod tests {
         assert!(prompt.contains("do something"));
         assert!(prompt.contains("[1]"));
         assert!(prompt.contains("cmd:"));
+    }
+    
+    #[test]
+    fn test_parse_workflow_simple() {
+        let input = "workflow: deploy = docker build && docker push";
+        match parse_feedback_response(input) {
+            FeedbackResponse::WorkflowInline(def) => {
+                assert_eq!(def.name, "deploy");
+                assert_eq!(def.steps.len(), 1);
+                assert_eq!(def.steps[0].0, "main");
+                assert_eq!(def.steps[0].1, "docker build && docker push");
+            }
+            _ => panic!("Expected WorkflowInline"),
+        }
+    }
+    
+    #[test]
+    fn test_parse_workflow_multistep() {
+        let input = "workflow: deploy\nbuild: cargo build --release\ntest: cargo test";
+        match parse_feedback_response(input) {
+            FeedbackResponse::WorkflowInline(def) => {
+                assert_eq!(def.name, "deploy");
+                assert_eq!(def.steps.len(), 2);
+                assert_eq!(def.steps[0].0, "build");
+                assert_eq!(def.steps[1].0, "test");
+            }
+            _ => panic!("Expected WorkflowInline"),
+        }
+    }
+    
+    #[test]
+    fn test_parse_workflow_with_params() {
+        let input = "workflow: deploy to {env}\npush: scp app {env}.server.com:/app/";
+        match parse_feedback_response(input) {
+            FeedbackResponse::WorkflowInline(def) => {
+                assert_eq!(def.name, "deploy to {env}");
+                assert!(def.parameters.contains(&"env".to_string()));
+            }
+            _ => panic!("Expected WorkflowInline"),
+        }
     }
 }
 

@@ -27,6 +27,7 @@ mod tools;
 mod ui;
 mod user_feedback;
 mod workflow;
+mod workflows;
 
 #[derive(Debug, Parser)]
 #[command(author, version, about = "LLM-powered CLI (Rust + Ollama)")]

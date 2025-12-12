@@ -963,6 +963,105 @@ fn submit_input(app: &mut App) {
 
 fn handle_pending_workflow(app: &mut App, prompt: &str) {
     if let Some(workflow) = app.pending_workflow.take() {
+        // Handle workflow registration states
+        use crate::workflow::WorkflowKind;
+        match &workflow.kind {
+            WorkflowKind::WorkflowRegistrationName => {
+                let name = prompt.trim().to_string();
+                if name.is_empty() {
+                    app.reply("Workflow name cannot be empty.");
+                    return;
+                }
+                app.reply(format!(
+                    "Creating workflow '{}'\n\n\
+                     Describe what this workflow should do:\n\
+                     (Example: build app, run tests, push docker image)",
+                    name
+                ));
+                app.pending_workflow = Some(WorkflowState {
+                    kind: WorkflowKind::WorkflowRegistrationDescribe { name },
+                    repo_root: workflow.repo_root,
+                });
+                return;
+            }
+            WorkflowKind::WorkflowRegistrationDescribe { name } => {
+                let description = prompt.trim();
+                // Generate workflow steps using LLM
+                app.reply(format!("Generating workflow steps for '{}'...", name));
+                // For now, use a simple parser (would use LLM in full implementation)
+                let steps = vec![
+                    ("Step 1".to_string(), description.to_string()),
+                ];
+                app.reply(format!(
+                    "Generated workflow '{}':\n{}\n\n\
+                     [y]es to save, [e]dit, [p]arameters, [c]ancel",
+                    name,
+                    steps.iter().enumerate()
+                        .map(|(i, (n, c))| format!("  {}. {}: {}", i + 1, n, c))
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                ));
+                app.pending_workflow = Some(WorkflowState {
+                    kind: WorkflowKind::WorkflowRegistrationReview {
+                        name: name.clone(),
+                        steps,
+                    },
+                    repo_root: workflow.repo_root,
+                });
+                return;
+            }
+            WorkflowKind::WorkflowRegistrationReview { name, steps } => {
+                let response = prompt.trim().to_lowercase();
+                match response.as_str() {
+                    "" | "y" | "yes" => {
+                        // Save workflow
+                        use crate::learned::{Workflow, WorkflowStep};
+                        use std::time::SystemTime;
+                        
+                        let now = SystemTime::now()
+                            .duration_since(SystemTime::UNIX_EPOCH)
+                            .unwrap()
+                            .as_secs();
+                        
+                        let workflow_obj = Workflow {
+                            name: name.clone(),
+                            description: None,
+                            parameters: vec![],
+                            steps: steps.iter().map(|(n, c)| WorkflowStep {
+                                name: n.clone(),
+                                command: c.clone(),
+                                continue_on_error: false,
+                            }).collect(),
+                            timestamp: now.to_string(),
+                            source: "user_interactive".to_string(),
+                        };
+                        
+                        let save_path = std::path::PathBuf::from(".llm-cli/learned.toml");
+                        let mut learned = LearnedAliases::load(&app.config.learned_path, 
+                            app.session.repo_root.as_ref().map(|r| r.join(".llm-cli/learned.toml")).as_deref())
+                            .unwrap_or_default();
+                        
+                        if let Err(e) = learned.save_workflow(workflow_obj, &save_path) {
+                            app.reply(format!("Failed to save workflow: {}", e));
+                        } else {
+                            app.reply(format!("✓ Saved workflow '{}'!", name));
+                        }
+                        return;
+                    }
+                    "c" | "cancel" => {
+                        app.reply("Workflow registration cancelled.");
+                        return;
+                    }
+                    _ => {
+                        app.reply("Please respond with [y]es, [e]dit, [p]arameters, or [c]ancel");
+                        app.pending_workflow = Some(workflow);
+                        return;
+                    }
+                }
+            }
+            _ => {}
+        }
+        
         // Need to handle special case for SaveWorkPlan
         if matches!(workflow.kind, crate::workflow::WorkflowKind::SaveWorkPlan) {
             let confirmed = matches!(prompt.trim().to_lowercase().as_str(), "" | "y" | "yes");
@@ -1165,8 +1264,49 @@ fn handle_user_feedback_response(app: &mut App, response: &str) {
             app.pending_user_feedback = Some(original_input);
         }
         
+        user_feedback::FeedbackResponse::WorkflowInline(workflow_def) => {
+            // Save workflow from inline syntax
+            use crate::learned::{Workflow, WorkflowStep};
+            use std::time::SystemTime;
+            
+            let now = SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_secs();
+            
+            let workflow = Workflow {
+                name: workflow_def.name.clone(),
+                description: None,
+                parameters: workflow_def.parameters.iter().map(|p| {
+                    crate::learned::Parameter {
+                        name: p.clone(),
+                        prompt: format!("Enter value for {}:", p),
+                        default: None,
+                    }
+                }).collect(),
+                steps: workflow_def.steps.iter().map(|(name, command)| WorkflowStep {
+                    name: name.clone(),
+                    command: command.clone(),
+                    continue_on_error: false,
+                }).collect(),
+                timestamp: now.to_string(),
+                source: "user_inline".to_string(),
+            };
+            
+            if let Err(e) = learned.save_workflow(workflow.clone(), &save_path) {
+                app.reply(format!("Failed to save workflow: {}", e));
+            } else {
+                app.reply(format!(
+                    "✓ Saved workflow '{}' ({} step{})",
+                    workflow.name,
+                    workflow.steps.len(),
+                    if workflow.steps.len() == 1 { "" } else { "s" }
+                ));
+            }
+        }
+        
         user_feedback::FeedbackResponse::Invalid => {
-            app.reply("Invalid selection. Please type:\n  • A number (1-8) to select a tool\n  • Natural language description (e.g., 'stage and commit only')\n  • 'cmd: <command>' for explicit shell command\n  • 'none' to skip");
+            app.reply("Invalid selection. Please type:\n  • A number (1-8) to select a tool\n  • Natural language description (e.g., 'stage and commit only')\n  • 'cmd: <command>' for explicit shell command\n  • 'workflow: name = command' for inline workflow\n  • 'none' to skip");
             app.pending_user_feedback = Some(original_input);
         }
     }

@@ -28,10 +28,39 @@ pub struct CustomCommand {
     pub source: String, // "user_custom_generated", "user_custom_edited", "user_custom"
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Parameter {
+    pub name: String,  // e.g., "branch", "message", "env"
+    pub prompt: String,  // e.g., "Enter branch name:"
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkflowStep {
+    pub name: String,  // e.g., "Build", "Test", "Deploy"
+    pub command: String,  // Can contain {param} and {{LLM_PLACEHOLDER}}
+    #[serde(default)]
+    pub continue_on_error: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Workflow {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub parameters: Vec<Parameter>,
+    pub steps: Vec<WorkflowStep>,
+    pub timestamp: String,
+    pub source: String,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct LearnedAliases {
     aliases: HashMap<String, LearnedAlias>,
     custom_commands: HashMap<String, CustomCommand>,
+    workflows: HashMap<String, Workflow>,
 }
 
 impl LearnedAliases {
@@ -40,6 +69,7 @@ impl LearnedAliases {
     pub fn load(global_path: &Path, project_path: Option<&Path>) -> Result<Self> {
         let mut aliases = HashMap::new();
         let mut custom_commands = HashMap::new();
+        let mut workflows = HashMap::new();
         
         // Load global aliases
         if global_path.exists() {
@@ -67,6 +97,18 @@ impl LearnedAliases {
             let data = Self::load_custom_commands_from_file(&global_legacy_path)?;
             for cmd in data.custom_commands {
                 custom_commands.insert(cmd.phrase.to_lowercase(), cmd);
+            }
+        }
+        
+        // Load global workflows
+        let global_workflows_path = global_path.parent()
+            .map(|p| p.join("workflows.toml"))
+            .unwrap_or_else(|| global_path.with_file_name("workflows.toml"));
+        
+        if global_workflows_path.exists() {
+            let data = Self::load_workflows_from_file(&global_workflows_path)?;
+            for workflow in data.workflows {
+                workflows.insert(workflow.name.to_lowercase(), workflow);
             }
         }
         
@@ -99,9 +141,21 @@ impl LearnedAliases {
                     custom_commands.insert(cmd.phrase.to_lowercase(), cmd);
                 }
             }
+            
+            // Load project-local workflows (overrides global)
+            let proj_workflows_path = proj_path.parent()
+                .map(|p| p.join("workflows.toml"))
+                .unwrap_or_else(|| proj_path.with_file_name("workflows.toml"));
+            
+            if proj_workflows_path.exists() {
+                let data = Self::load_workflows_from_file(&proj_workflows_path)?;
+                for workflow in data.workflows {
+                    workflows.insert(workflow.name.to_lowercase(), workflow);
+                }
+            }
         }
         
-        Ok(Self { aliases, custom_commands })
+        Ok(Self { aliases, custom_commands, workflows })
     }
     
     fn load_from_file(path: &Path) -> Result<LearnedData> {
@@ -131,6 +185,12 @@ impl LearnedAliases {
         Ok(CustomCommandsData {
             custom_commands: legacy.macros,
         })
+    }
+    
+    fn load_workflows_from_file(path: &Path) -> Result<WorkflowsData> {
+        let contents = fs::read_to_string(path)
+            .with_context(|| format!("reading workflows from {}", path.display()))?;
+        toml::from_str(&contents).context("parsing workflows.toml")
     }
     
     /// Save a new learned alias to the specified file.
@@ -236,6 +296,46 @@ impl LearnedAliases {
         Ok(())
     }
     
+    /// Save a new workflow to workflows.toml.
+    pub fn save_workflow(
+        &mut self,
+        workflow: Workflow,
+        base_path: &Path,
+    ) -> Result<()> {
+        self.workflows.insert(workflow.name.to_lowercase(), workflow.clone());
+        
+        // Determine workflows.toml path
+        let workflows_path = if base_path.file_name().map_or(false, |n| n == "learned.toml") {
+            base_path.parent()
+                .map(|p| p.join("workflows.toml"))
+                .unwrap_or_else(|| base_path.with_file_name("workflows.toml"))
+        } else {
+            base_path.join("workflows.toml")
+        };
+        
+        // Load existing file or create new
+        let mut data = if workflows_path.exists() {
+            Self::load_workflows_from_file(&workflows_path).unwrap_or_else(|_| WorkflowsData { workflows: vec![] })
+        } else {
+            WorkflowsData { workflows: vec![] }
+        };
+        
+        // Check if workflow name already exists, replace if so
+        data.workflows.retain(|w| w.name.to_lowercase() != workflow.name.to_lowercase());
+        data.workflows.push(workflow);
+        
+        // Ensure parent directory exists
+        if let Some(parent) = workflows_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        
+        // Save
+        let contents = toml::to_string_pretty(&data)?;
+        fs::write(workflows_path, contents)?;
+        
+        Ok(())
+    }
+    
     /// Try to match a phrase against learned aliases and custom commands.
     /// Custom commands are checked first (higher priority).
     pub fn match_phrase(&self, phrase: &str) -> Option<ParsedIntent> {
@@ -266,7 +366,21 @@ impl LearnedAliases {
             phrases.push(custom_cmd.phrase.clone());
         }
         
+        for workflow in self.workflows.values() {
+            phrases.push(workflow.name.clone());
+        }
+        
         phrases
+    }
+    
+    /// Get all workflows.
+    pub fn get_workflows(&self) -> &HashMap<String, Workflow> {
+        &self.workflows
+    }
+    
+    /// Get a specific workflow by name (case-insensitive).
+    pub fn get_workflow(&self, name: &str) -> Option<&Workflow> {
+        self.workflows.get(&name.to_lowercase())
     }
     
 }
@@ -281,6 +395,12 @@ struct LearnedData {
 struct CustomCommandsData {
     #[serde(default)]
     custom_commands: Vec<CustomCommand>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct WorkflowsData {
+    #[serde(default)]
+    workflows: Vec<Workflow>,
 }
 
 #[cfg(test)]

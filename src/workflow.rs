@@ -44,6 +44,23 @@ pub enum WorkflowKind {
         proposed: String,
         description: String,
     },
+    // Workflow registration states
+    WorkflowRegistrationName,
+    WorkflowRegistrationDescribe { name: String },
+    WorkflowRegistrationReview {
+        name: String,
+        steps: Vec<(String, String)>,
+    },
+    WorkflowRegistrationParams {
+        name: String,
+        steps: Vec<(String, String)>,
+    },
+    // Workflow execution state
+    WorkflowExecution {
+        workflow_name: String,
+        current_step: usize,
+        params: std::collections::HashMap<String, String>,
+    },
 }
 
 pub trait WorkflowResponder {
@@ -100,6 +117,15 @@ pub fn handle_workflow_response<R: WorkflowResponder>(
             description,
         } => {
             handle_apply_diff(responder, &workflow.repo_root, prompt, file, original, proposed, description);
+        }
+        // Workflow registration states handled in app.rs
+        WorkflowKind::WorkflowRegistrationName
+        | WorkflowKind::WorkflowRegistrationDescribe { .. }
+        | WorkflowKind::WorkflowRegistrationReview { .. }
+        | WorkflowKind::WorkflowRegistrationParams { .. }
+        | WorkflowKind::WorkflowExecution { .. } => {
+            // These are handled in app.rs with access to async context
+            responder.reply("Workflow state managed in app context");
         }
     }
 }

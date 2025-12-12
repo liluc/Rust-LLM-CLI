@@ -21,7 +21,7 @@ use crate::{
 //       Weak matches like "hello" in "shell command" score ~86
 const FUZZY_MIN_SCORE: i64 = 90;
 
-/// Try exact and fuzzy matching against tool names, examples, and learned aliases.
+/// Try exact and fuzzy matching against tool names, examples, learned aliases, and workflows.
 /// Returns Some(intent) if a confident match is found, None otherwise.
 pub fn fuzzy_match(input: &str, learned: &LearnedAliases) -> Option<ParsedIntent> {
     let input_lower = input.to_lowercase();
@@ -29,6 +29,24 @@ pub fn fuzzy_match(input: &str, learned: &LearnedAliases) -> Option<ParsedIntent
     // 1. Check learned aliases first (highest priority)
     if let Some(intent) = learned.match_phrase(&input_lower) {
         return Some(intent);
+    }
+    
+    // 2. Check workflows (with parameter extraction)
+    // This returns a special intent marker that will be handled in app.rs
+    if let Some(workflow) = learned.get_workflow(&input_lower) {
+        // Exact match - no parameters
+        let mut intent = ParsedIntent::new("execute_workflow", 1.0);
+        intent.args.query = Some(workflow.name.clone());
+        return Some(intent);
+    }
+    
+    // Try parameter-aware workflow matching
+    for (_workflow_name, workflow) in learned.get_workflows() {
+        if let Some(_params) = extract_workflow_parameters(&workflow.name, input) {
+            let mut intent = ParsedIntent::new("execute_workflow", 0.95);
+            intent.args.query = Some(workflow.name.clone());
+            return Some(intent);
+        }
     }
     
     // 2. Exact match against tool names
@@ -99,6 +117,37 @@ pub fn fuzzy_match(input: &str, learned: &LearnedAliases) -> Option<ParsedIntent
     })
 }
 
+/// Extract parameter values from user input based on workflow pattern.
+/// Example: workflow name "deploy to {env}", input "deploy to staging"
+/// Returns: Some({"env": "staging"})
+fn extract_workflow_parameters(pattern: &str, input: &str) -> Option<std::collections::HashMap<String, String>> {
+    let pattern_lower = pattern.to_lowercase();
+    let input_lower = input.to_lowercase();
+    
+    // Split pattern and input into tokens
+    let pattern_tokens: Vec<&str> = pattern_lower.split_whitespace().collect();
+    let input_tokens: Vec<&str> = input_lower.split_whitespace().collect();
+    
+    if pattern_tokens.len() != input_tokens.len() {
+        return None;
+    }
+    
+    let mut params = std::collections::HashMap::new();
+    
+    for (p_token, i_token) in pattern_tokens.iter().zip(input_tokens.iter()) {
+        if p_token.starts_with('{') && p_token.ends_with('}') {
+            // Extract parameter name
+            let param_name = &p_token[1..p_token.len()-1];
+            params.insert(param_name.to_string(), i_token.to_string());
+        } else if p_token != i_token {
+            // Non-parameter tokens must match exactly
+            return None;
+        }
+    }
+    
+    Some(params)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -143,6 +192,23 @@ mod tests {
         let learned = LearnedAliases::default();
         let intent = fuzzy_match("xyz123abc", &learned);
         assert!(intent.is_none());
+    }
+    
+    #[test]
+    fn test_extract_workflow_parameters() {
+        let pattern = "deploy to {env}";
+        let input = "deploy to staging";
+        
+        let params = extract_workflow_parameters(pattern, input).unwrap();
+        assert_eq!(params.get("env"), Some(&"staging".to_string()));
+    }
+    
+    #[test]
+    fn test_extract_workflow_parameters_no_match() {
+        let pattern = "deploy to {env}";
+        let input = "build the app";
+        
+        assert!(extract_workflow_parameters(pattern, input).is_none());
     }
 }
 
