@@ -102,6 +102,7 @@ struct App {
     input: String,
     messages: Vec<Message>,
     scroll: usize,
+    scroll_locked: bool, // When true, don't auto-reset scroll to bottom
     pending_idxs: Vec<usize>,
     input_history: Vec<String>,
     history_idx: Option<usize>,
@@ -135,6 +136,7 @@ impl App {
             input: String::new(),
             messages: Vec::new(),
             scroll: 0,
+            scroll_locked: false,
             pending_idxs: Vec::new(),
             input_history: Vec::new(),
             history_idx: None,
@@ -192,10 +194,13 @@ impl App {
             match event {
                 AssistantEvent::Token { idx, chunk } => self.append_assistant_chunk(idx, chunk),
                 AssistantEvent::Completed { idx, content } => self.finish_assistant(idx, content),
-                AssistantEvent::Failed { idx, error } => self.fail_assistant(idx, error),
+                AssistantEvent::Failed { idx, error} => self.fail_assistant(idx, error),
             }
-            self.scroll = 0;
-            self.viewing_history = false;
+            // Only reset scroll if not locked
+            if !self.scroll_locked {
+                self.scroll = 0;
+                self.viewing_history = false;
+            }
         }
     }
 
@@ -223,6 +228,29 @@ impl App {
             content,
         });
         self.scroll = 0;
+        self.viewing_history = false;
+    }
+
+    fn reply_scroll_to_top(&mut self, content: impl Into<String>) {
+        let content = content.into();
+        
+        // Count lines in the message to set appropriate scroll
+        // We need to estimate rendered lines considering wrapping
+        let line_count = content.lines().count();
+        
+        self.messages.push(Message {
+            role: Role::Assistant,
+            content: content.clone(),
+        });
+        self.session.record(Message {
+            role: Role::Assistant,
+            content,
+        });
+        
+        // Set scroll to a high value to show the top of the message
+        // This will be clamped by the UI rendering logic
+        self.scroll = line_count.saturating_add(100);
+        self.scroll_locked = true; // Lock scroll so it doesn't auto-reset
         self.viewing_history = false;
     }
 
@@ -491,6 +519,10 @@ impl IntentDispatcher for App {
         self.reply(content);
     }
 
+    fn reply_scroll_to_top(&mut self, content: impl Into<String>) {
+        self.reply_scroll_to_top(content);
+    }
+
     fn push_recorded(&mut self, role: Role, content: impl Into<String>) -> usize {
         self.push_recorded(role, content)
     }
@@ -631,6 +663,9 @@ fn submit_input(app: &mut App) {
 
     app.history_idx = None;
     app.input.clear();
+    
+    // User is submitting new input, unlock scroll so new responses appear at bottom
+    app.scroll_locked = false;
 
     // Handle pending workflow confirmations first (before recording to history)
     if app.pending_workflow.is_some() {
@@ -909,6 +944,8 @@ fn scroll_session_history_up(app: &mut App) {
     app.viewing_history = true;
     // Scroll up (increase scroll offset from bottom)
     app.scroll = app.scroll.saturating_add(3);
+    // User is manually scrolling, unlock auto-scroll
+    app.scroll_locked = false;
 }
 
 fn scroll_session_history_down(app: &mut App) {
@@ -921,4 +958,6 @@ fn scroll_session_history_down(app: &mut App) {
     if app.scroll == 0 {
         app.viewing_history = false;
     }
+    // User is manually scrolling, unlock auto-scroll
+    app.scroll_locked = false;
 }

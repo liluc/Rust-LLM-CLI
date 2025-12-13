@@ -23,6 +23,7 @@ pub enum AssistantEvent {
 
 pub trait IntentDispatcher {
     fn reply(&mut self, content: impl Into<String>);
+    fn reply_scroll_to_top(&mut self, content: impl Into<String>);
     fn push_recorded(&mut self, role: Role, content: impl Into<String>) -> usize;
     fn set_pending_workflow(&mut self, workflow: WorkflowState);
     fn get_session_cwd(&self) -> PathBuf;
@@ -772,6 +773,6 @@ VERSION
 For specific questions, just ask naturally: "How do I stage specific files?"
 "#;
 
-    dispatcher.reply(help_text.to_string());
+    dispatcher.reply_scroll_to_top(help_text.to_string());
 }
 
