@@ -520,9 +520,9 @@ fn handle_write_file_intent<D: IntentDispatcher>(
 ) {
     // Extract path and content
     let path_str = args.path.clone().or_else(|| {
-        // Try to extract from input like "write to main.rs"
+        // Try to extract from input like "write file main.rs" or "write to main.rs"
         let lower = original_input.to_lowercase();
-        for prefix in ["write to ", "save to ", "create "] {
+        for prefix in ["write file ", "write to ", "save to ", "create file ", "create "] {
             if let Some(rest) = lower.strip_prefix(prefix) {
                 let parts: Vec<&str> = rest.split_whitespace().collect();
                 if !parts.is_empty() {
@@ -600,7 +600,9 @@ fn parse_show_file(prompt: &str) -> Option<PathBuf> {
 
 fn extract_path_from_list_command(input: &str) -> Option<String> {
     let lower = input.to_lowercase();
-    for prefix in ["list files in ", "show files in ", "ls ", "dir "] {
+    
+    // Try patterns with "in" keyword first
+    for prefix in ["list files in ", "show files in "] {
         if let Some(rest) = lower.strip_prefix(prefix) {
             let path = rest.trim();
             if !path.is_empty() {
@@ -608,6 +610,17 @@ fn extract_path_from_list_command(input: &str) -> Option<String> {
             }
         }
     }
+    
+    // Try direct path patterns (list files <path>, list file <path>)
+    for prefix in ["list files ", "list file ", "ls ", "dir "] {
+        if let Some(rest) = lower.strip_prefix(prefix) {
+            let path = rest.trim();
+            if !path.is_empty() {
+                return Some(path.to_string());
+            }
+        }
+    }
+    
     None
 }
 
