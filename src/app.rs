@@ -176,9 +176,9 @@ impl App {
             input: &self.input,
             input_mode: self.input_mode,
             model: &self.config.model,
-            streaming: self.config.streaming,
+            _streaming: self.config.streaming,
             cwd: self.session.cwd.to_string_lossy().to_string(),
-            repo_root: self
+            _repo_root: self
                 .session
                 .repo_root
                 .as_ref()
