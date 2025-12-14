@@ -745,7 +745,7 @@ SEMANTIC CONTEXT
     CLI:  [understands 'it' refers to the shown changes]
 
 CONFIGURATION
-    Config location: .llm-cli/config.toml (or ~/.config/llm-cli/config.toml)
+    Config location: .llm-cli/config.toml (or pass --config <path>)
     
     Customize:
     • LLM model selection
@@ -775,4 +775,3 @@ For specific questions, just ask naturally: "How do I stage specific files?"
 
     dispatcher.reply_scroll_to_top(help_text.to_string());
 }
-
