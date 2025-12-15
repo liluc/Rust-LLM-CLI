@@ -48,21 +48,19 @@ By setting a realistic scope, we created a polished prototype that demonstrates 
 
 ## 2. Objectives
 
-The main objective is to build a lightweight, Rust-based CLI powered by local LLM inference. The CLI supports context-aware sessions, integrates with developer tools, and showcases agentic workflows that feel practical and safe.
+Build a lightweight, Rust-native terminal assistant that improves day-to-day developer workflows while staying **local**, **fast**, and **safe**.
 
-**Core objectives achieved:**
+**Outcome-focused objectives:** 
 
-1. **Stateful CLI Context**: The CLI maintains system-level context (working directory, repository path, command history) and semantic context (recent command outputs). When you run "show status" and then type "commit it", the system correctly links "it" to the shown diff through reference detection and context injection.
+1. **Keep inference local and private**: Provide a usable LLM experience without relying on hosted APIs, so code and prompts stay on the user’s machine.
 
-2. **Local Inference with Ollama**: All LLM inference runs locally via Ollama, avoiding remote APIs. Streaming output makes responses feel responsive. Health checks at startup ensure Ollama is running and required models are available.
+2. **Feel native in the terminal**: Deliver a responsive, full-screen TUI experience that supports real iterative work (quick follow-ups, scrollback, and history), not a one-off chatbot demo.
 
-3. **Full-Screen TUI with Ratatui**: The interface provides a clean conversation log, fixed input area, and status bar showing model, working directory, and runtime state. Text wraps properly, and the UI updates smoothly during streaming.
+3. **Reduce friction for common repo tasks**: Help users move from “what changed?” to “ready to save/share work” with fewer manual steps and clearer, more structured workflows.
 
-4. **Tiered Intent Resolution**: A 3-tier system resolves user intent from natural language: Tier 1 uses fuzzy matching (< 1ms), Tier 2 uses keyword+embedding hybrid (~50ms), and Tier 3 uses a small LLM classifier (~500ms). The system defaults to conversational chat when uncertain, providing natural fallback.
+4. **Handle natural language reliably**: Translate a range of everyday phrasing into the right action, while still providing a graceful fallback to normal chat when intent is unclear.
 
-5. **Agentic Workflows with Safety**: Multi-step workflows like "save work" execute a plan (stage, commit, push) only after showing a preview and receiving confirmation. Users can accept or override suggested commit messages. This keeps automation transparent and intentional.
-
-6. **Repository Awareness**: The CLI automatically detects project types (Rust, Node.js, Python, Go) and git repositories, tailoring commands accordingly. It can show status/diffs, generate commit messages, and search for TODOs.
+5. **Make automation trustworthy**: Ensure potentially destructive actions are transparent and user-controlled via previews and explicit confirmations.
 
 ---
 
@@ -80,7 +78,11 @@ Uses Ollama for local inference with streaming output—text appears progressive
 
 Tracks working directory, repository root, and project type. Maintains input history and a window of recent outputs (last 5, max 2000 chars each). When reference words like "it", "that", or "the diff" are detected, relevant context is injected into the LLM prompt. This enables natural follow-up: "show status" followed by "commit it" works as expected.
 
-### Tiered Intent Resolution
+### Intent Routing, Workflows, and Command Learning
+
+In this project, a **workflow** means a user-facing action that expands into a **series of individual commands** (e.g., multiple `git` steps) with **previews + explicit confirmation** before execution. We use this term throughout the CLI because many “smart” behaviors (git automation, running commands suggested by the LLM, and saving custom commands) share the same plan/confirm/execute pattern.
+
+#### Tiered Intent Resolution (how text becomes an action)
 
 **Tier 1 (< 1ms)**: Fuzzy matching against learned aliases, exact tool names, and examples. Resolves 90% of common commands instantly.
 
@@ -88,7 +90,7 @@ Tracks working directory, repository root, and project type. Maintains input his
 
 **Tier 3 (~500ms)**: Small LLM classifier (default: `qwen2:1.5b`) handles novel phrasing. Falls back to chat when uncertain.
 
-Learned commands are stored in `.llm-cli/learned.toml` and matched instantly in future sessions.
+This tiered routing is what decides whether your input should start a **workflow** (e.g., a git workflow), run a single tool action, run a shell command, or fall back to chat.
 
 ### Command Routing and Safety
 
@@ -98,7 +100,7 @@ Supports two modes toggled with Ctrl+S:
 
 In Chat mode, prefix commands with `$` or `!` for shell execution. Bang shortcuts (`!!` for last command, `!prefix` for last command starting with prefix) provide bash-style convenience. When the LLM suggests shell commands, users must confirm before execution.
 
-### Git Workflows
+#### Git Workflows (multi-step)
 
 **Save work**: Shows plan with status preview, asks confirmation, stages changes, generates commit message based on staged diff, lets user accept/override message, commits, and pushes. Execution report shows results.
 
@@ -120,17 +122,28 @@ In Chat mode, prefix commands with `$` or `!` for shell execution. Bang shortcut
 
 **Find TODOs**: Ripgrep-based search for TODO/FIXME comments (requires `rg` on PATH)
 
-### Custom Command Learning
+#### Custom Command Learning (workflow special case)
 
 When the LLM generates shell commands, users can execute them (`y`), save them as learned commands (`s`), or skip (`n`). Learned commands are matched instantly (< 1ms) in Tier 1 on subsequent uses, enabling personalized workflows.
 
 ### Ghost Text Completion
 
-As users type, ghost text suggestions appear based on frecency-ranked history, learned commands, and tool examples. Press Tab to accept. Completions are mode-aware (Chat vs Shell).
+As users type, ghost text suggestions appear and can be accepted with Tab. Completions are mode-aware (Chat vs Shell) and come from three sources: tool examples, recent history, and learned phrases.
+
+**How the suggestion is chosen (high-level algorithm):**
+- **Path completion first**: If the last token looks like a path, the CLI suggests filesystem completions from the current directory, prioritizing candidates by a **file frecency score** (recent/frequent file paths), and appending `/` for directories.
+- **Otherwise, command completion**:
+  - **Candidate pool**: tool examples + the most recent history entries + learned phrases.
+  - **Scoring**: each candidate gets a **fuzzy-match score** against your current input, then receives a **frecency boost** so frequently/recently used items are preferred.
+  - **Display rule**: ghost text only appears when the chosen candidate **starts with your current input**, and the UI shows only the **remaining suffix** (so Tab completes what you’ve already typed).
 
 ### Embedding Cache
 
 Pre-computed embeddings for tool examples are cached in `.llm-cli/embeddings.toml`, providing 10-20x startup speedup (from ~1-2s to ~0.1s). Cache invalidates automatically if the embedding model changes.
+
+### Help / Manual
+
+Typing `help` (or `?`) shows an in-app manual with modes, key bindings, and common commands. The CLI also supports standard Clap help output via `--help`.
 
 ---
 
@@ -155,6 +168,12 @@ save work                 # Stage, commit with generated message, and push
 commit                    # Commit without push
 stage all                 # Stage all changes
 draft commit message      # Generate commit message from staged changes
+```
+
+**Help / manual:**
+```
+help                      # Show in-app manual (modes, key bindings, common commands)
+?                         # Alias for help
 ```
 
 **File operations:**
