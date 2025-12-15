@@ -160,6 +160,14 @@ This section is a “from zero to running” setup. For OS-specific install deta
 - **Git**: recommended (required for git-related workflows)
 - **ripgrep (`rg`)**: optional (required only for `find todos`)
 
+**Install Ollama:**
+- macOS: `brew install --cask ollama` (then launch Ollama once to start the service)
+- Linux: `curl -fsSL https://ollama.com/install.sh | sh`
+
+**Install ripgrep (optional but recommended for `find todos`):**
+- macOS: `brew install ripgrep`
+- Linux: `sudo apt install ripgrep` (or use your distro’s package manager)
+
 #### 2) Start Ollama and pull required models
 
 1. Start the Ollama daemon (leave it running):
@@ -174,13 +182,13 @@ ollama serve
 ollama pull llama3
 ```
 
-3. (Recommended) Pull the embedding model to enable semantic intent matching (Tier 2):
+3. Pull the embedding model to enable semantic intent matching:
 
 ```bash
 ollama pull nomic-embed-text
 ```
 
-4. (Optional) Pull a small classifier model to improve intent routing fallback (Tier 3):
+4. Pull a small classifier model to improve intent routing fallback:
 
 ```bash
 ollama pull qwen2:1.5b
