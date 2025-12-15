@@ -149,9 +149,63 @@ Typing `help` (or `?`) shows an in-app manual with modes, key bindings, and comm
 
 ## 4. User Guide
 
-### Basic Usage
+### Getting Started (Setup + Run)
 
-After starting the CLI, the full-screen interface opens with a conversation panel at top and input area at bottom.
+This section is a “from zero to running” setup. For OS-specific install details (macOS vs Ubuntu), see **Reproducibility Guide**; the steps below describe the required components and the exact commands you’ll run once they’re installed.
+
+#### 1) Install prerequisites
+
+- **Rust toolchain**: `rustc` + `cargo` (via `rustup`)
+- **Ollama**: installed and running locally
+- **Git**: recommended (required for git-related workflows)
+- **ripgrep (`rg`)**: optional (required only for `find todos`)
+
+#### 2) Start Ollama and pull required models
+
+1. Start the Ollama daemon (leave it running):
+
+```bash
+ollama serve
+```
+
+2. Pull the default chat model used by this project:
+
+```bash
+ollama pull llama3
+```
+
+3. (Recommended) Pull the embedding model to enable semantic intent matching (Tier 2):
+
+```bash
+ollama pull nomic-embed-text
+```
+
+4. (Optional) Pull a small classifier model to improve intent routing fallback (Tier 3):
+
+```bash
+ollama pull qwen2:1.5b
+```
+
+#### 3) Build and run the application
+
+From the project root (the directory containing `Cargo.toml`):
+
+```bash
+cargo build
+cargo run
+```
+
+Optional health check (verifies Ollama reachability + model availability):
+
+```bash
+cargo run -- health --model llama3
+```
+
+If your environment is set up correctly, the CLI will open a full-screen TUI.
+
+### Using the CLI (after it launches)
+
+After starting, the full-screen interface opens with a conversation panel at top and an input area at bottom.
 
 **Essential keyboard shortcuts:**
 - Type naturally and press Enter to chat
@@ -170,11 +224,7 @@ stage all                 # Stage all changes
 draft commit message      # Generate commit message from staged changes
 ```
 
-**Help / manual:**
-```
-help                      # Show in-app manual (modes, key bindings, common commands)
-?                         # Alias for help
-```
+If you forget commands or key bindings at any time, type `help` (or `?`) inside the app.
 
 **File operations:**
 ```
@@ -207,23 +257,25 @@ When the LLM suggests shell commands, type:
 - `s` or `save`: Save as learned command
 - `n` or `no`: Skip
 
-**Configuration:**
+**Configuration (`.llm-cli/config.toml`):**
 
-Create `.llm-cli/config.toml` in your project directory:
+- Copy `config.example.toml` to `.llm-cli/config.toml` to configure models, prompts, timeouts, and storage paths. Pass an explicit file via `cargo run -- --config /path/to/config.toml` if needed.
+- When the file is missing, the CLI falls back to built-in defaults so it still works out of the box. Those defaults are:
+  - `model = "llama3"`
+  - `system_prompt = "Reply in concise bullets. Use short sentences. Break lines for each bullet. Be direct."`
+  - `llm_timeout_secs = 45`
+  - `cmd_timeout_secs = 60`
+  - `max_context_tokens = 4096`
+  - `streaming = true`
+  - `request_timeout_secs = 60`
+  - `generate_commit_message = true`
+  - `history_path = ".llm-cli/history.jsonl"`
+  - `embedding_cache_path = ".llm-cli/embeddings.toml"`
+  - `embedding_model = "nomic-embed-text"`
+  - `classifier_model = "qwen2:1.5b"`
+  - `learned_path = ".llm-cli/learned.toml"`
 
-```toml
-model = "llama3"
-embedding_model = "nomic-embed-text"
-classifier_model = "qwen2:1.5b"
-
-llm_timeout_secs = 45
-cmd_timeout_secs = 60
-
-streaming = true
-generate_commit_message = true
-```
-
-Or use environment variables:
+You can also override any field temporarily with environment variables:
 ```bash
 export LLM_CLI_MODEL="llama3:8b"
 export LLM_CLI_STREAMING="true"
@@ -231,6 +283,7 @@ export LLM_CLI_STREAMING="true"
 
 All project-specific files are stored in `.llm-cli/` directory (history, learned commands, embeddings, frecency data).
 
+An example config file with comments is provided as `config.example.toml`. Feel free to copy it to `.llm-cli/config.toml` and modify as needed.
 ---
 
 ## 5. Reproducibility Guide
