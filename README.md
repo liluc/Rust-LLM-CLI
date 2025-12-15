@@ -160,60 +160,11 @@ This section is a “from zero to running” setup. For OS-specific install deta
 - **Git**: recommended (required for git-related workflows)
 - **ripgrep (`rg`)**: optional (required only for `find todos`)
 
-**Install Ollama:**
-- macOS: `brew install --cask ollama` (then launch Ollama once to start the service)
-- Linux: `curl -fsSL https://ollama.com/install.sh | sh`
-
-**Install ripgrep (optional but recommended for `find todos`):**
-- macOS: `brew install ripgrep`
-- Linux: `sudo apt install ripgrep` (or use your distro’s package manager)
-
-#### 2) Start Ollama and pull required models
-
-1. Start the Ollama daemon (leave it running):
-
-```bash
-ollama serve
-```
-
-2. Pull the default chat model used by this project:
-
-```bash
-ollama pull llama3
-```
-
-3. Pull the embedding model to enable semantic intent matching:
-
-```bash
-ollama pull nomic-embed-text
-```
-
-4. Pull a small classifier model to improve intent routing fallback:
-
-```bash
-ollama pull qwen2:1.5b
-```
-
-#### 3) Build and run the application
-
-From the project root (the directory containing `Cargo.toml`):
-
-```bash
-cargo build
-cargo run
-```
-
-Optional health check (verifies Ollama reachability + model availability):
-
-```bash
-cargo run -- health --model llama3
-```
-
-If your environment is set up correctly, the CLI will open a full-screen TUI.
-
 ### Using the CLI (after it launches)
 
 After starting, the full-screen interface opens with a conversation panel at top and an input area at bottom.
+
+A `help` page is available inside the app with 'help' or '?' in `Chat` mode, showing all available commands and key bindings.
 
 **Essential keyboard shortcuts:**
 - Type naturally and press Enter to chat
@@ -224,6 +175,8 @@ After starting, the full-screen interface opens with a conversation panel at top
 - Esc/q/Ctrl+C: Quit
 
 **Git workflows:**
+Pre-configured git workflows are available when running inside a git repository.
+
 ```
 status                    # Show git status and diffstat
 save work                 # Stage, commit with generated message, and push
@@ -329,7 +282,8 @@ brew install --cask ollama
 **4. Pull models:**
 ```bash
 ollama pull llama3
-ollama pull nomic-embed-text   # Optional but recommended for semantic matching
+ollama pull nomic-embed-text 
+ollama pull qwen2:1.5b
 ```
 
 **5. Install ripgrep (optional):**
@@ -378,6 +332,7 @@ ollama serve
 ```bash
 ollama pull llama3
 ollama pull nomic-embed-text
+ollama pull qwen2:1.5b
 ```
 
 **7. Install ripgrep (optional):**
@@ -409,40 +364,29 @@ Create `.llm-cli/config.toml` in your project directory (see User Guide for form
 
 After the UI opens:
 
-1. **Test chat**: Type "Give me a two sentence description of Rust" and confirm streaming response appears
+1. **Test chat**: Type "describe this repo" and confirm streaming response appears
 2. **Test history**: Press Up to recall last prompt, edit, and resend
-3. **Test git** (if in repo): Type `status` to show git status and diffstat
+3. **Test git workflow** (if in repo): Type `save work` to show git status and diffstat
 4. **Test file operations**: Type `show Cargo.toml` or `list files in src`
 5. **Test TODO search** (if ripgrep installed): Type `find todos`
-
-### Common Issues and Solutions
-
-**"Ollama daemon unreachable"**
-- Run `ollama serve` in a separate terminal
-
-**"Model not found"**
-- Run `ollama pull llama3`
-
-**"find todos" not working**
-- Install ripgrep: `brew install ripgrep` (macOS) or `apt install ripgrep` (Ubuntu)
-
-**Git features not working**
-- Ensure you're inside a git repository and git is installed
-
-**"embeddings: disabled" in status bar**
-- Run `ollama pull nomic-embed-text` to enable semantic matching
-- Or ignore—basic features work without embeddings
 
 ---
 
 ## 6. Contributions by Each Team Member
 
-### Yingxuan Hu
+### Ruitong Li 
 
-**Ollama Integration and Streaming:**
-- Implemented Ollama client with streaming output and health checks
-- Built server-sent events parsing for real-time responses
-- Added error categorization (unreachable vs model missing)
+**Developer Tools:**
+- Implemented shell command execution with subprocess management
+- Built file operations (read, write, list) with safety boundaries
+- Created tools registry for centralized definitions
+- Added proper error handling and user-facing messages
+
+**Configuration and Session:**
+- Built hierarchical configuration system (defaults, TOML file, env vars)
+- Implemented session state tracking (cwd, repo root, messages, outputs)
+- Added project type detection integration
+- Created message streaming state management
 
 **Intent Resolution System:**
 - Designed 3-tier intent resolution architecture
@@ -472,8 +416,14 @@ After the UI opens:
 - Added unit tests for key modules
 - Wrote comprehensive documentation
 - Created health check script and reproducibility guide
+- Created the demo video
 
-### Ruitong Li
+### Yingxuan Hu 
+
+**Ollama Integration and Streaming:**
+- Implemented Ollama client with streaming output and health checks
+- Built server-sent events parsing for real-time responses
+- Added error categorization (unreachable vs model missing)
 
 **Terminal UI System:**
 - Designed and implemented full-screen Ratatui interface
@@ -500,23 +450,17 @@ After the UI opens:
 - Integrated with history, learned commands, and tool examples
 - Added Tab key acceptance
 
-**Configuration and Session:**
-- Built hierarchical configuration system (defaults, TOML file, env vars)
-- Implemented session state tracking (cwd, repo root, messages, outputs)
-- Added project type detection integration
-- Created message streaming state management
-
-**Developer Tools:**
-- Implemented shell command execution with subprocess management
-- Built file operations (read, write, list) with safety boundaries
-- Created tools registry for centralized definitions
-- Added proper error handling and user-facing messages
-
 **Mode Switching and Polish:**
 - Implemented Chat/Shell mode toggle with visual indicators
 - Added shell command shortcuts (`$`, `!`) in Chat mode
 - Fixed terminal state issues, race conditions, and scroll bugs
 - Improved error messages throughout codebase
+
+**Testing and Documentation:**
+- Added unit tests for key modules
+- Wrote comprehensive documentation
+- Created health check script and reproducibility guide
+- Created the slide presentation video
 
 ---
 
