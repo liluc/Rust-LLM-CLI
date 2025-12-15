@@ -1,319 +1,463 @@
 # LLM-Powered CLI
 
-**Studnet names:**\
-Ruitong Li, \
+**Student names:**  
+Ruitong Li, 1006912815  
 Yingxuan Hu, 1006881377
 
-**Contact email:**\
-ruiton.li@mail.utoronto.ca\
+**Contact email:**  
+ruiton.li@mail.utoronto.ca  
 alvin.hu@mail.utoronto.ca
 
-# Table of Contents
+---
 
-- [LLM-Powered CLI](#llm-powered-cli)
-- [Table of Contents](#table-of-contents)
+# Video Slide Presentation
+
+[Link to be added: Video presentation explaining the project architecture, features, and demonstration]
+
+---
+
+# Video Demo
+
+[Link to be added: Screencast demonstration of the LLM CLI in use]
+
+---
+
+# Final Report
+
+## Table of Contents
+
 - [1. Motivation](#1-motivation)
 - [2. Objectives](#2-objectives)
-    - [Stateful CLI Context (System+LLM)](#stateful-cli-context-systemllm)
-    - [Local Inference with Ollama (Stateless Prompts)](#local-inference-with-ollama-stateless-prompts)
-    - [Ratatui TUI with Conversation Log](#ratatui-tui-with-conversation-log)
-    - [Agentic Workflow (Basic to Advanced)](#agentic-workflow-basic-to-advanced)
-    - [Repo Awareness](#repo-awareness)
-    - [Stretch Goals](#stretch-goals)
-- [3. Features(add more to this)](#3-featuresadd-more-to-this)
-    - [Terminal UI and conversation layout](#terminal-ui-and-conversation-layout)
-    - [Chat model and streaming output](#chat-model-and-streaming-output)
-    - [Session context and prompt iteration](#session-context-and-prompt-iteration)
-    - [Command routing and safety boundary](#command-routing-and-safety-boundary)
-    - [Git save workflow](#git-save-workflow)
-    - [Search and read inside repo](#search-and-read-inside-repo)
-    - [Diff inspection and diff summarization](#diff-inspection-and-diff-summarization)
-    - [Polish and limits](#polish-and-limits)
-- [4. User Guide and Developer Guide](#4-user-guide-and-developer-guide)
+- [3. Features](#3-features)
+- [4. User Guide](#4-user-guide)
 - [5. Reproducibility Guide](#5-reproducibility-guide)
-    - [Prerequisites on both macOS and Ubuntu](#prerequisites-on-both-macos-and-ubuntu)
-    - [macOS Sonoma setup](#macos-sonoma-setup)
-    - [Ubuntu Linux server setup](#ubuntu-linux-server-setup)
-    - [Optional configuration on both platforms](#optional-configuration-on-both-platforms)
-    - [Quick sanity checks after launch](#quick-sanity-checks-after-launch)
-    - [Common issues and expected behavior](#common-issues-and-expected-behavior)
-- [6.Contributions by Each Team Member](#6contributions-by-each-team-member)
-    - [Yingxuan](#yingxuan)
-    - [Ruitong](#ruitong)
+- [6. Contributions by Each Team Member](#6-contributions-by-each-team-member)
 - [7. Lessons Learned and Concluding Remarks](#7-lessons-learned-and-concluding-remarks)
 
+---
 
-# 1. Motivation
-
-A lack of a lightweight, Rust-native LLM-powered CLI exists in the
-current ecosystem. Existing solutions, such as Codex CLI and AIChat, are
-often too heavy or tied to other ecosystems, leaving a gap for a simple,
-Rust-based alternative. This gap matters because many developers who
-choose Rust do so precisely for its speed, safety, and efficiency in
-building small, reliable tools. When they want to experiment with
-AI-driven workflows, they often have no choice but to rely on bulky
-tools from other languages, which can feel out of place in the Rust
-ecosystem.
-
-This project is designed to address that gap while remaining enjoyable
-to build. For us, it represents both a fun challenge and a learning
-opportunity. It brings together three areas we want to practice more
-deeply: systems programming in Rust, the design of text-based user
-interfaces, and the integration of large language models into developer
-tools. A project like this is not only rewarding to implement but also
-relevant to ongoing conversations about how developers can interact with
-AI in their day-to-day work.
-
-Another reason this idea motivates us is its feasibility. By setting a
-realistic scope, we believe two contributors working for one to two
-weeks can create a polished prototype that demonstrates novelty without
-being overwhelming. We see the novelty in its Rust-first design and in
-its ability to demonstrate agentic workflows in a lightweight way.
-Instead of being just a demonstration for this course, the project can
-act as a base for something more ambitious if we decide to keep building
-it later.
+## 1. Motivation
 
-# 2. Objectives
+A lack of a lightweight, LLM-powered CLI exists in the current ecosystem. Existing solutions like Codex CLI and AIChat are often too heavy or tied to other ecosystems, leaving a gap for a simple alternative. This gap matters because many developers who choose Rust do so for its speed, safety, and efficiency in building small, reliable tools. When they want to experiment with AI-driven workflows, they often have no choice but to rely on bulky tools.
 
-The main objective of this project is to build a lightweight, Rust-based
-CLI powered by local LLM inference. The CLI will support context-aware
-sessions, integrate with a small set of developer tools, and showcase
-basic agentic workflows on a scale that feels practical but still novel.
+This project addresses that gap while remaining enjoyable to build. It brings together three areas we want to practice deeply: systems programming in Rust, text-based user interface design, and integration of large language models into developer tools. The project is both rewarding to implement and relevant to ongoing conversations about how developers can interact with AI in their day-to-day work.
 
-We want the final tool to feel natural to use in the terminal. It should
-behave less like an isolated demo and more like a familiar part of a
-developer's toolkit. To achieve this, we have outlined a set of core
-features. Each one is chosen not only for what it adds individually but
-also for how it contributes to the overall experience.
+By setting a realistic scope, we created a polished prototype that demonstrates novelty without being overwhelming. The novelty lies in its Rust-first design, its ability to demonstrate agentic workflows in a lightweight way, and its practical integration into terminal-based development workflows.
 
-### Stateful CLI Context (System+LLM) 
+---
 
-The CLI maintains both system-level and semantic context. On the
-system side, it remembers the current working directory, repository
-path, and command history, so interactions feel cohesive like in a shell
-or REPL. On the semantic side, the CLI now tracks recent command outputs
-(diffs, files, shell results) and resolves references in conversation.
-For example, after running "show status", typing "commit it" correctly
-links "it" to the shown diff. The system uses Cursor-style context
-injection: when reference words are detected, recent outputs are added
-to the LLM prompt for natural resolution. See
-[SEMANTIC_CONTEXT.md](docs/SEMANTIC_CONTEXT.md) for details.
+## 2. Objectives
 
-### Local Inference with Ollama (Stateless Prompts)
+The main objective is to build a lightweight, Rust-based CLI powered by local LLM inference. The CLI supports context-aware sessions, integrates with developer tools, and showcases agentic workflows that feel practical and safe.
 
-We will use Ollama to run LLM inference locally. Running locally avoids
-the need for remote APIs, which improves speed and keeps code private.
-For the initial version, prompts will be treated statelessly. This keeps
-the system simple while still offering powerful functionality such as
-generating summaries or drafting commit messages. Even with this limited
-form, the tool gives developers the chance to use AI-powered queries
-directly in their terminal.
+**Core objectives achieved:**
 
-### Ratatui TUI with Conversation Log
+1. **Stateful CLI Context**: The CLI maintains system-level context (working directory, repository path, command history) and semantic context (recent command outputs). When you run "show status" and then type "commit it", the system correctly links "it" to the shown diff through reference detection and context injection.
 
-The interface will be built with Ratatui. This will give us a clean,
-scrollable conversation log of inputs and outputs, along with a
-straightforward input box for new commands. Having a polished interface
-matters because it makes the tool more approachable. Instead of looking
-like a wall of text, interactions feel organized, easy to follow, and
-engaging.
+2. **Local Inference with Ollama**: All LLM inference runs locally via Ollama, avoiding remote APIs. Streaming output makes responses feel responsive. Health checks at startup ensure Ollama is running and required models are available.
 
-### Agentic Workflow (Basic to Advanced)
+3. **Full-Screen TUI with Ratatui**: The interface provides a clean conversation log, fixed input area, and status bar showing model, working directory, and runtime state. Text wraps properly, and the UI updates smoothly during streaming.
 
-As a demonstration of agentic behavior, the CLI will support multi-step
-workflows. For example, "save work to remote" could trigger git add, git
-commit with a generated message, and git push. Over time, this may
-expand into a rule-based planner capable of dynamically sequencing
-commands based on higher-level instructions. This progression shows how
-the assistant can evolve from scripted helpers into more flexible
-agents.
+4. **Tiered Intent Resolution**: A 3-tier system resolves user intent from natural language: Tier 1 uses fuzzy matching (< 1ms), Tier 2 uses keyword+embedding hybrid (~50ms), and Tier 3 uses a small LLM classifier (~500ms). The system defaults to conversational chat when uncertain, providing natural fallback.
 
-### Repo Awareness 
+5. **Agentic Workflows with Safety**: Multi-step workflows like "save work" execute a plan (stage, commit, push) only after showing a preview and receiving confirmation. Users can accept or override suggested commit messages. This keeps automation transparent and intentional.
 
-The CLI is now repo-aware and automatically detects project types
-(Rust, Node.js, Python, Go). It tailors commands based on the detected
-project type (e.g., running `cargo test` for Rust or `npm test` for
-Node.js). The infrastructure is also in place for proposing fixes as
-diffs, with a workflow for users to accept, reject, or modify changes.
-See [REPO_AWARENESS.md](REPO_AWARENESS.md) for details.
+6. **Repository Awareness**: The CLI automatically detects project types (Rust, Node.js, Python, Go) and git repositories, tailoring commands accordingly. It can show status/diffs, generate commit messages, and search for TODOs.
 
-### Stretch Goals
+---
 
-If time allows, we have identified some additional features that would
-add depth without shifting the project's main focus. They show how the
-CLI could grow into something much more useful in the future.
-# 3. Features(add more to this)
+## 3. Features
 
-The final deliverable is a Rust native terminal application that combines a full screen chat interface with a local language model running through Ollama and a set of developer tools that operate on the current directory or git repository. The user stays in a single conversation view. In Chat mode, normal text is treated as a prompt to the model (or a recognized tool intent) and the reply appears in the same log. In Shell mode, inputs are executed as shell commands in the current working directory. This keeps the assistant tightly connected to repository context instead of feeling like a separate chatbot.
+### Terminal UI and Conversation Layout
 
-### Terminal UI and conversation layout
+Built with Ratatui, the full-screen interface displays messages labeled as System, User, or Assistant. Long lines wrap properly. The input area stays fixed at the bottom, and a status bar shows the active model, working directory, and runtime state. Users can scroll with PgUp/PgDn and navigate input history with Up/Down arrows.
 
-The interface is built with Ratatui and Crossterm and runs in a full screen terminal mode. Messages are displayed in a conversation panel and labeled as System, user, or assistant so it is clear where each message comes from. Long lines wrap to the terminal width to maintain readability as the session grows. The input area stays fixed at the bottom so the user can keep typing while output streams. A compact status line shows the active model, current working directory, and lightweight runtime state such as pending replies or an in progress workflow confirmation. The UI also supports simple quality of life controls such as scrolling the conversation and accepting inline (ghost) completions.
+### Chat Model and Streaming Output
 
-### Chat model and streaming output
+Uses Ollama for local inference with streaming output—text appears progressively rather than all at once. Default model is `llama3`, configurable via environment variable or config file. Startup health checks verify Ollama connectivity and model availability.
 
-The chat feature uses local inference through Ollama. Prompts are sent to Ollama and responses are displayed using streaming output, so text appears gradually rather than arriving all at once. This makes the interaction feel faster and more interactive, especially for longer responses. The default model is llama3, but users can switch models using configuration or the LLM_CLI_MODEL environment variable. On startup (and via the health subcommand), the tool checks whether Ollama is reachable and whether the selected model exists locally.
+### Session Context and Semantic References
 
-### Session context and prompt iteration
+Tracks working directory, repository root, and project type. Maintains input history and a window of recent outputs (last 5, max 2000 chars each). When reference words like "it", "that", or "the diff" are detected, relevant context is injected into the LLM prompt. This enables natural follow-up: "show status" followed by "commit it" works as expected.
 
-To support real terminal workflows, the tool keeps lightweight session context. It tracks the current working directory, detects a git repo root when applicable, and detects the project type (Rust, Node.js, Python, Go) to choose sensible build/test defaults. The tool also maintains in memory input history that can be navigated with the keyboard, which supports iterative prompting by letting users recall, edit, and resend previous prompts quickly. In addition, the tool records a small window of recent deterministic outputs (e.g., git status/diff previews and file reads) and can inject them into the model prompt when the user refers to “it”, “that”, or “the diff”.
+### Tiered Intent Resolution
 
-### Command routing and safety boundary
+**Tier 1 (< 1ms)**: Fuzzy matching against learned aliases, exact tool names, and examples. Resolves 90% of common commands instantly.
 
-Command routing is a core part of the design and the main safety mechanism. The tool supports two main interaction styles: Chat mode and Shell mode. In Chat mode, the input is interpreted either as normal chat (sent to the LLM) or as a recognized tool intent (handled by deterministic code). In Shell mode, inputs are executed as shell commands in the current working directory, with built in handling for cd and pwd and basic safeguards against obviously interactive commands (for example, a bare git commit without a message). When the assistant response contains shell commands, the tool does not execute them automatically; it prompts the user to confirm before executing or saving them.
+**Tier 2 (~50ms)**: Hybrid scoring combining keyword matching (60% weight) and semantic embeddings (40% weight). Requires `nomic-embed-text` model. Handles paraphrasing and synonyms.
 
-### Git save workflow
+**Tier 3 (~500ms)**: Small LLM classifier (default: `qwen2:1.5b`) handles novel phrasing. Falls back to chat when uncertain.
 
-The tool’s git save workflow demonstrates multi step automation in a controlled way. Developers often repeat the same steps when saving work, including staging changes, committing, and pushing. When the user asks to “save work” or “push changes”, the tool first prints a clear plan (including a short status preview) and asks for confirmation. If confirmed, it stages changes, suggests a commit message based on staged diffs, lets the user accept or override the message, then runs commit and push and prints a short execution report. This design supports convenience while keeping execution intentional and transparent.
+Learned commands are stored in `.llm-cli/learned.toml` and matched instantly in future sessions.
 
-### Search and read inside repo
+### Command Routing and Safety
 
-To make code context gathering fast inside the TUI, the tool includes a small set of repo inspection actions. The tool can display a file’s contents inside the conversation log (for example, “show src/main.rs”) and can list directories (for example, “list files in src”). For lightweight search, it supports a focused TODO/FIXME scan (“find todos”) using ripgrep when available. File writing is supported via an explicit “write file … with content: …” action and always requires a confirmation step before creating or overwriting a file.
+Supports two modes toggled with Ctrl+S:
+- **Chat Mode**: Natural language processed through intent system or sent to LLM
+- **Shell Mode**: Direct shell command execution
 
-### Diff inspection and diff summarization
+In Chat mode, prefix commands with `$` or `!` for shell execution. Bang shortcuts (`!!` for last command, `!prefix` for last command starting with prefix) provide bash-style convenience. When the LLM suggests shell commands, users must confirm before execution.
 
-For reviewing changes, the tool supports diff inspection with lightweight follow ups. A “status” request shows git status and a diffstat summary, then allows the user to provide a file path to view that file’s git diff. For model assisted writing, the tool can generate a suggested commit message based on staged changes, which is useful for turning a diff into a readable summary for commits. A dedicated “summarize diff” command is not implemented; summarization is currently focused on commit message generation for staged diffs.
+### Git Workflows
 
-### Polish and limits
+**Save work**: Shows plan with status preview, asks confirmation, stages changes, generates commit message based on staged diff, lets user accept/override message, commits, and pushes. Execution report shows results.
 
-Several design choices help the tool stay usable in real sessions. Streaming output reduces perceived latency, wrapped text prevents layout issues, and confirmations are used for workflows and for executing shell commands suggested by the assistant. The status bar keeps key context visible so users understand where actions apply, and the tool supports basic scrolling and history navigation for longer sessions. At the same time, the tool intentionally keeps memory limited to the current session (history plus a small window of recent outputs), provides only basic scrollback controls, and focuses developer tooling on a small set of common actions rather than a large command surface. These limitations kept the implementation within scope while leaving clear room for future improvement.
+**Status**: Shows `git status --short` and `diff --stat` summary. User can type a file path to view that file's diff.
 
-# 4. User Guide and Developer Guide
+**Commit**: Commits without push, with LLM-generated message suggestion.
 
-A user can start the program from the repository root or from any directory they want to work in. The interface opens as a full screen terminal view. The main area shows the conversation log, and an input box at the bottom accepts text. When the user types normal text and presses Enter, the tool treats it as an LLM prompt. It sends the prompt to the local Ollama server and streams the reply into the conversation log. This is the standard mode for asking questions, getting explanations, drafting short text, and summarizing information.
+**Stage**: Stages changes with confirmation.
 
-Prompt history is available through the Up and Down arrow keys. Pressing Up brings the previous prompt back into the input box. The user can edit it and press Enter to send it again. This supports iterative prompting and makes it faster to refine instructions without retyping.
+**Draft commit message**: Generates commit message from staged changes.
 
-The tool supports two interaction styles. In Chat mode (default), the input is interpreted either as normal chat (sent to the LLM) or as a recognized tool intent (handled by deterministic code). In Shell mode (toggle with Ctrl+S), inputs are executed as shell commands in the current working directory. As a shortcut, you can also run explicit shell commands in Chat mode by prefixing the line with $ or !, and you can repeat the last shell command with !!.
+### File Operations and Code Search
 
-Common developer actions are exposed through natural language. For example, “status” shows git status and a diffstat summary, and then you can type a file path to view that file’s diff. “save work” prints a plan and asks for confirmation before staging, generating a suggested commit message, committing, and pushing. “find todos” runs a TODO/FIXME scan (requires ripgrep). “show src/main.rs” prints file contents in the log, “list files in src” lists directory entries, and “write file notes.txt with content: …” creates or overwrites a file after a confirmation prompt.
+**Show file**: Displays file contents in conversation (e.g., "show src/main.rs")
 
-From a developer perspective, the codebase is organized so each part has a clear job. The UI module handles terminal setup, layout, rendering, and input events. The session module tracks runtime context such as the working directory, repo root detection, and prompt history. The model module communicates with Ollama, including streaming responses. The command routing module resolves user intent (chat vs tool vs shell) and calls the deterministic tool implementations, while workflows use explicit confirmations before execution. This design keeps a clear boundary between model text generation and command execution, which supports both safety and easier maintenance.
+**List files**: Lists directory contents (e.g., "list files in src")
 
-# 5. Reproducibility Guide
+**Write file**: Creates/overwrites files with confirmation (e.g., "write to notes.txt with content: ...")
 
-This section explains how to set up and run the project from a clean environment on macOS Sonoma and on an Ubuntu Linux server. The steps are written so the instructor can follow them exactly without filling in missing details. The project is a Rust native full screen terminal application. You build it with Cargo and run it from a terminal. The chat features depend on a local Ollama daemon because the tool invokes the `ollama` CLI for inference. If Ollama is not installed, not running, or the selected model is missing, the program will fail fast at startup with a clear error message.
+**Find TODOs**: Ripgrep-based search for TODO/FIXME comments (requires `rg` on PATH)
 
-Repo related features such as viewing diffs and running the git save workflow require running the tool inside a git repository. If you run it in a directory that is not a repository, repo oriented actions (like status/save work/commit) will report that no repository was found, which is expected behavior. The TODO scan uses ripgrep, so ripgrep must be installed if you want “find todos” to work.
+### Custom Command Learning
 
-### Prerequisites on both macOS and Ubuntu
+When the LLM generates shell commands, users can execute them (`y`), save them as learned commands (`s`), or skip (`n`). Learned commands are matched instantly (< 1ms) in Tier 1 on subsequent uses, enabling personalized workflows.
 
-You need a working Rust toolchain so Cargo can build the project, and you need Ollama installed to provide local model inference. You also need to pull at least one model into Ollama. The project uses llama3 by default, so pulling llama3 is the simplest way to match expected behavior. Git should be installed if you want repo workflows (status, stage, commit, save work) since those features call git under the hood. Ripgrep is optional and only required for the “find todos” scan.
+### Ghost Text Completion
 
-### macOS Sonoma setup
+As users type, ghost text suggestions appear based on frecency-ranked history, learned commands, and tool examples. Press Tab to accept. Completions are mode-aware (Chat vs Shell).
 
-Begin by installing Rust using rustup. This is the standard method and ensures Cargo and the compiler are placed in your home directory in a predictable way.
+### Embedding Cache
 
-`curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh`
+Pre-computed embeddings for tool examples are cached in `.llm-cli/embeddings.toml`, providing 10-20x startup speedup (from ~1-2s to ~0.1s). Cache invalidates automatically if the embedding model changes.
 
-After installation, restart the terminal. This step matters on macOS because the installer updates your shell profile so Cargo can be found in new sessions. Confirm that both rustc and cargo are available.
+---
 
-`rustc --version
-cargo --version`
-
-Next install Ollama using Homebrew. This installs the Ollama application, which runs a background service that the CLI tool communicates with.
-
-`brew install --cask ollama`
-
-Launch Ollama once so the background service starts. You can do this by opening the Ollama app from Spotlight. Once it has been launched, pull the default model used by the project.
-
-`ollama pull llama3`
-
-At this point, Ollama is ready and the model is available locally. If you want to use the “find todos” scan, install ripgrep.
-
-`brew install ripgrep`
-
-Now build and run the project. These commands must be run from the project root directory, meaning the folder that contains Cargo.toml.
-
-`cargo build
-cargo run`
-
-When the program starts, it switches the terminal into a full screen interface. You can type normal text and press Enter to chat with the model. You can press Up and Down to move through input history and resend a modified prompt. You can also trigger deterministic tools using natural language. For example, “status” shows git status and diffstat and then lets you type a file path to view that file’s diff. “find todos” runs a TODO/FIXME scan if ripgrep is installed. “show Cargo.toml” prints a file into the conversation, and “list files in src” lists directory entries. To save work, use “save work” (it prints a plan and asks for confirmation before staging, committing, and pushing).
-
-### Ubuntu Linux server setup
-
-Start by installing basic packages needed for building and using the tool. Build essential provides a standard compilation environment, curl is needed to download installers, and git is required for repository features.
-
-`sudo apt update
-sudo apt install -y build-essential curl git`
-
-Install Rust using rustup in non interactive mode. Then load the Cargo environment into the current shell session so cargo is available immediately without logging out.
-
-`curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -y
-source "$HOME/.cargo/env"`
-
-Confirm that Rust is installed.
-
-`rustc --version
-cargo --version`
-
-Install Ollama using the official Linux installer script.
-
-`curl -fsSL https://ollama.com/install.sh | sh`
-
-Start the Ollama server. On a server, you should run this in a dedicated terminal session because it needs to stay running while the TUI is in use.
-
-`ollama serve`
-
-In a second SSH session, pull the default model. This separates model downloads from the server process and makes it easier to see errors if the pull fails.
-
-`ollama pull llama3`
-
-If you want to use the “find todos” scan, install ripgrep.
-
-`sudo apt install -y ripgrep`
-
-Now build and run the project from the repository root directory.
-
-`cargo build
-cargo run`
-
-The program will open the full screen TUI inside the terminal session. The basic interaction is the same as on macOS. Normal input becomes a model prompt (or a recognized tool intent), and you can toggle into Shell mode with Ctrl+S to run shell commands directly. For repo workflows, ensure you are running inside a git repository. If you are testing on a server and want to avoid pushing to a real remote, you can still type “save work” to see the plan and then cancel instead of confirming.
-
-### Optional configuration on both platforms
-
-The tool supports selecting a different model. To do that, set LLM_CLI_MODEL to the desired model name, pull it into Ollama, then run the tool. The pull step is important because setting the environment variable alone does not download the model.
-
-`export LLM_CLI_MODEL=llama3.2:3b
+## 4. User Guide
+
+### Basic Usage
+
+After starting the CLI, the full-screen interface opens with a conversation panel at top and input area at bottom.
+
+**Essential keyboard shortcuts:**
+- Type naturally and press Enter to chat
+- Up/Down: Navigate input history
+- Ctrl+S: Toggle between Chat and Shell modes
+- Tab: Accept ghost text completion
+- PgUp/PgDn: Scroll conversation
+- Esc/q/Ctrl+C: Quit
+
+**Git workflows:**
+```
+status                    # Show git status and diffstat
+save work                 # Stage, commit with generated message, and push
+commit                    # Commit without push
+stage all                 # Stage all changes
+draft commit message      # Generate commit message from staged changes
+```
+
+**File operations:**
+```
+show src/main.rs         # Display file contents
+list files in src        # List directory
+write to notes.txt with content: ...  # Create/overwrite file
+```
+
+**Code search:**
+```
+find todos               # Search TODO/FIXME (requires ripgrep)
+```
+
+**Shell mode:**
+- Toggle with Ctrl+S to run shell commands directly
+- Built-in: `cd <path>`, `pwd`
+
+**Bang shortcuts in Chat mode:**
+```
+$ ls -la                 # Execute shell command
+! pwd                    # Execute shell command (alternative)
+!!                       # Repeat last shell command
+!cargo                   # Run last command starting with "cargo"
+```
+
+**Custom commands:**
+
+When the LLM suggests shell commands, type:
+- `y` or `yes`: Execute
+- `s` or `save`: Save as learned command
+- `n` or `no`: Skip
+
+**Configuration:**
+
+Create `.llm-cli/config.toml` in your project directory:
+
+```toml
+model = "llama3"
+embedding_model = "nomic-embed-text"
+classifier_model = "qwen2:1.5b"
+
+llm_timeout_secs = 45
+cmd_timeout_secs = 60
+
+streaming = true
+generate_commit_message = true
+```
+
+Or use environment variables:
+```bash
+export LLM_CLI_MODEL="llama3:8b"
+export LLM_CLI_STREAMING="true"
+```
+
+All project-specific files are stored in `.llm-cli/` directory (history, learned commands, embeddings, frecency data).
+
+---
+
+## 5. Reproducibility Guide
+
+The instructor will follow these steps on Ubuntu Linux server and macOS Sonoma. The project is a Rust terminal application built with Cargo. Chat features depend on Ollama running locally. Git features require running inside a git repository. TODO search requires ripgrep.
+
+### Prerequisites (Both Platforms)
+
+- Rust toolchain (via rustup)
+- Ollama 0.13+ installed and running
+- At least one model pulled (we use `llama3`)
+- Git (for repository features)
+- Ripgrep (optional, for TODO search)
+
+### macOS Sonoma Setup
+
+**1. Install Rust:**
+```bash
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+# Restart terminal after installation
+```
+
+**2. Verify installation:**
+```bash
+rustc --version
+cargo --version
+```
+
+**3. Install Ollama:**
+```bash
+brew install --cask ollama
+# Launch Ollama from Spotlight to start the service
+```
+
+**4. Pull models:**
+```bash
+ollama pull llama3
+ollama pull nomic-embed-text   # Optional but recommended for semantic matching
+```
+
+**5. Install ripgrep (optional):**
+```bash
+brew install ripgrep
+```
+
+**6. Build and run:**
+```bash
+cd /path/to/project
+cargo build
+cargo run
+```
+
+### Ubuntu Linux Server Setup
+
+**1. Install dependencies:**
+```bash
+sudo apt update
+sudo apt install -y build-essential curl git
+```
+
+**2. Install Rust:**
+```bash
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+source "$HOME/.cargo/env"
+```
+
+**3. Verify installation:**
+```bash
+rustc --version
+cargo --version
+```
+
+**4. Install Ollama:**
+```bash
+curl -fsSL https://ollama.com/install.sh | sh
+```
+
+**5. Start Ollama (in separate terminal session):**
+```bash
+ollama serve
+```
+
+**6. Pull models (in second terminal):**
+```bash
+ollama pull llama3
+ollama pull nomic-embed-text
+```
+
+**7. Install ripgrep (optional):**
+```bash
+sudo apt install -y ripgrep
+```
+
+**8. Build and run:**
+```bash
+cd /path/to/project
+cargo build
+cargo run
+```
+
+### Optional Configuration
+
+**Use a different model:**
+```bash
+export LLM_CLI_MODEL=llama3.2:3b
 ollama pull llama3.2:3b
-cargo run`
+cargo run
+```
 
-You can also set values in `.llm-cli/config.toml` (or pass `--config <path>`), which is useful when you want a repeatable setup without exporting environment variables.
+**Custom config:**
 
-### Quick sanity checks after launch
+Create `.llm-cli/config.toml` in your project directory (see User Guide for format).
 
-After the UI opens, first verify model chat by typing a short prompt such as "Give me a two sentence description of this tool" and confirm that the response streams into the conversation. If you do not see a response, check that Ollama is running and that the model has been pulled.
+### Quick Sanity Checks
 
-Next verify prompt history by pressing Up to recall the last prompt, editing it slightly, and resending it. This confirms that the session history is active.
+After the UI opens:
 
-If you are inside a git repository with changes, verify repo features by typing “status” to show status and diffstat, then type a file path to view that file’s diff. To test the workflow planning feature safely, type “save work” and confirm that a plan is printed, then type anything other than Enter/yes to cancel.
+1. **Test chat**: Type "Give me a two sentence description of Rust" and confirm streaming response appears
+2. **Test history**: Press Up to recall last prompt, edit, and resend
+3. **Test git** (if in repo): Type `status` to show git status and diffstat
+4. **Test file operations**: Type `show Cargo.toml` or `list files in src`
+5. **Test TODO search** (if ripgrep installed): Type `find todos`
 
-Finally, verify developer tooling by typing “show Cargo.toml” (or another small file), “list files in src”, and “find todos” if ripgrep is installed.
+### Common Issues and Solutions
 
-### Common issues and expected behavior
+**"Ollama daemon unreachable"**
+- Run `ollama serve` in a separate terminal
 
-If the tool reports that it cannot reach Ollama, the server is likely not running. Start ollama serve and try again. If the tool reports that the model is missing, run ollama pull with the model name you are using. If “find todos” does not work, confirm that ripgrep is installed by running rg --version. If git related workflows do not work, confirm that git is installed and that you launched the tool inside a git repository.
-# 6.Contributions by Each Team Member
-### Yingxuan
-Yingxuan focused on connecting the chat experience to local inference and practical repository workflows. This included implementing the Ollama integration with streaming output so responses appear progressively in the UI, and adding startup and health checks so common setup problems (Ollama not running or a missing model) fail fast with clear messages.
+**"Model not found"**
+- Run `ollama pull llama3`
 
-Yingxuan also improved usability for repeated terminal use by implementing prompt history navigation and lightweight session context tracking, including the current working directory and git repo root detection when the tool is used inside a repository. This helps the tool feel consistent across a session and reduces confusion about where repo scoped commands apply.
+**"find todos" not working**
+- Install ripgrep: `brew install ripgrep` (macOS) or `apt install ripgrep` (Ubuntu)
 
-On the developer tooling side, Yingxuan implemented and refined intent based routing that separates normal chat prompts from deterministic tool actions. This enabled repo oriented features such as git status and diff previews, TODO/FIXME scanning via a ripgrep wrapper, and a commit message suggestion feature based on staged diffs. Yingxuan also contributed to the git save workflow by supporting a plan and confirmation flow and ensuring the results are presented clearly so users can understand what will happen and what was done.
+**Git features not working**
+- Ensure you're inside a git repository and git is installed
 
-To support reliability, Yingxuan added unit tests for key helper modules (such as learned aliases, file operations, and context formatting) and contributed to documentation updates that explain setup, configuration options such as model selection, and the command reference used in reproducibility and demo materials.
+**"embeddings: disabled" in status bar**
+- Run `ollama pull nomic-embed-text` to enable semantic matching
+- Or ignore—basic features work without embeddings
 
-### Ruitong
+---
 
+## 6. Contributions by Each Team Member
 
-# 7. Lessons Learned and Concluding Remarks
+### Yingxuan Hu
 
-We learned that streaming output is not just a nice extra feature but a major part of how users judge responsiveness. Even when a model takes the same amount of time to finish, showing text as it arrives makes the tool feel faster and reduces uncertainty. Implementing streaming also pushed us to design the program with clearer separation between rendering, session state, and background work, because the UI must update smoothly while new tokens continue to arrive.
+**Ollama Integration and Streaming:**
+- Implemented Ollama client with streaming output and health checks
+- Built server-sent events parsing for real-time responses
+- Added error categorization (unreachable vs model missing)
 
-We also learned that “agentic” behavior only feels useful when it is easy to trust. Developers are comfortable with automation when they can predict what will happen and when execution is clearly intentional. If command execution is triggered indirectly through free form text, users lose confidence quickly because the consequences can be real, especially in a git repository. Our plan and execute approach reinforced that it is possible to demonstrate multi step workflows while still keeping the user in control.
+**Intent Resolution System:**
+- Designed 3-tier intent resolution architecture
+- Built Tier 2 keyword+embedding hybrid classifier
+- Implemented Tier 3 LLM-based classifier
+- Created embedding cache system for 10-20x startup speedup
+- Documented system in `docs/INTENT_SYSTEM.md` and `docs/EMBEDDING_CACHE.md`
 
-Another lesson was that repository awareness can be valuable without being complicated. We did not need deep project analysis to create something useful. Simply detecting the repo root, exposing status and diff previews, and generating commit message suggestions from staged diffs already supports common tasks like writing commit messages and preparing short review notes. This incremental approach is practical because it delivers value early and provides a clear path for adding deeper repo features later without redesigning the system.
+**Repository Features:**
+- Implemented git workflows (status, save work, commit, stage, draft message)
+- Built commit message generation from staged diffs
+- Added TODO/FIXME scanning via ripgrep
+- Implemented repository and project type detection
 
-We also gained a better understanding of how much work goes into a terminal UI that feels stable. A TUI is easy to get working at a basic level, but small details determine whether it feels polished. Handling raw mode correctly, keeping layout consistent, wrapping text, truncating large outputs, and showing clear error messages all matter for reliability and usability. These details became especially important because our tool needs to remain readable while it is actively streaming output and printing tool results.
+**Semantic Context Resolution:**
+- Designed Cursor-style context injection system
+- Implemented reference word detection and recent outputs tracking
+- Enabled natural follow-up interactions ("commit it" after "show status")
+- Documented in `docs/SEMANTIC_CONTEXT.md`
 
-Overall, the project showed us that the best way to build an LLM assisted developer tool is to be deliberate about boundaries. The model is strongest at explanation and summarization, while deterministic commands are best for actions like reading files, searching code, and running git operations. Keeping those roles separate made the tool easier to reason about and safer to use, and it gives us a clear direction for future improvements.
+**Custom Command Learning:**
+- Built command extraction from LLM responses
+- Implemented learned aliases with TOML persistence
+- Integrated custom commands into Tier 1 for instant recall
+
+**Testing and Documentation:**
+- Added unit tests for key modules
+- Wrote comprehensive documentation
+- Created health check script and reproducibility guide
+
+### Ruitong Li
+
+**Terminal UI System:**
+- Designed and implemented full-screen Ratatui interface
+- Built three-panel layout (conversation, input, status bar)
+- Implemented text wrapping, scroll management, and ghost text rendering
+- Created `TerminalGuard` RAII pattern for reliable cleanup
+
+**Application Core:**
+- Architected main event loop and state coordination
+- Implemented async channel-based background task system
+- Built keyboard and mouse event handling
+- Created workflow state machine for multi-step confirmations
+- Added graceful shutdown handling
+
+**Input Processing:**
+- Implemented mode-aware input history with Up/Down navigation
+- Built bang shortcuts (`!!`, `!prefix`) with bash-style expansion
+- Added built-in commands (`cd`, `pwd`) with path expansion
+- Created input deduplication
+
+**Completion System:**
+- Designed ghost text completion provider
+- Built frecency-based ranking for suggestions
+- Integrated with history, learned commands, and tool examples
+- Added Tab key acceptance
+
+**Configuration and Session:**
+- Built hierarchical configuration system (defaults, TOML file, env vars)
+- Implemented session state tracking (cwd, repo root, messages, outputs)
+- Added project type detection integration
+- Created message streaming state management
+
+**Developer Tools:**
+- Implemented shell command execution with subprocess management
+- Built file operations (read, write, list) with safety boundaries
+- Created tools registry for centralized definitions
+- Added proper error handling and user-facing messages
+
+**Mode Switching and Polish:**
+- Implemented Chat/Shell mode toggle with visual indicators
+- Added shell command shortcuts (`$`, `!`) in Chat mode
+- Fixed terminal state issues, race conditions, and scroll bugs
+- Improved error messages throughout codebase
+
+---
+
+## 7. Lessons Learned and Concluding Remarks
+
+**Streaming output matters for perceived performance.** Even when a model takes the same time to finish, showing text as it arrives makes the tool feel faster and more responsive. Implementing streaming pushed us to design clearer separation between rendering, state, and background work.
+
+**Agentic behavior must be trustworthy.** Developers are comfortable with automation when they can predict outcomes and execution is intentional. Our plan-and-execute approach with confirmations demonstrates that multi-step workflows can be powerful while keeping users in control.
+
+**Repository awareness doesn't need complexity.** Simply detecting the repo root, exposing status/diff previews, and generating commit messages from staged diffs already supports common tasks effectively. This incremental approach delivers value early and provides a clear path for future enhancements.
+
+**Tiered intent resolution balances speed and flexibility.** By combining fuzzy matching (< 1ms), semantic embeddings (~50ms), and LLM classification (~500ms) with natural fallback to chat, we created a system that feels fast for common commands while gracefully handling novel phrasing. Most users develop habits, so optimizing for the common case while providing flexibility for exploration creates a system that adapts to user behavior over time.
+
+**Terminal UI stability requires attention to detail.** Handling raw mode correctly, keeping layout consistent, wrapping text, truncating large outputs, and showing clear error messages all matter for reliability. These details became especially important because the tool must remain readable while actively streaming output.
+
+**Startup performance has outsized impact.** The embedding cache system's 10-20x speedup transformed the tool from "slow to start" to "instant," fundamentally changing how willing we were to restart it frequently. Performance optimizations that improve iteration speed matter significantly for developer tools.
+
+**Simple heuristics can enable natural interaction.** Semantic context resolution via reference detection doesn't require sophisticated NLP. Simple string matching for pronouns and explicit references combined with a small queue of recent outputs created a surprisingly effective system for follow-up interactions.
+
+**Clear boundaries between LLM and deterministic code matter.** The model is strongest at explanation and summarization, while deterministic commands are best for actions like reading files, searching code, and running git operations. Keeping those roles separate made the tool easier to reason about and safer to use.
+
+**Future directions** include deeper repository analysis (AST parsing, symbol indexing), multi-file editing with diff previews, integration with external tools via MCP (Model Context Protocol), collaborative features (sharing learned commands), and performance optimization for large repositories.
+
+The project achieved its goal of creating a lightweight, Rust-native LLM-powered CLI that feels natural in developer workflows. More importantly, it demonstrated that local inference, semantic intent matching, and careful UX design can combine to create tools that augment rather than replace human decision-making.
